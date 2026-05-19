@@ -40,7 +40,7 @@ class TestYFinanceFinancialSourceLive:
         assert p["companyName"]
         assert p["sector"]
         assert p["industry"]
-        assert p["mktCap"] and p["mktCap"] > 0
+        assert p["marketCap"] and p["marketCap"] > 0
         assert p["currency"]
 
     async def test_get_realtime_quote(self):

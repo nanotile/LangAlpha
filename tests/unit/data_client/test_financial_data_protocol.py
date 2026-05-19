@@ -163,9 +163,9 @@ class TestFMPFinancialSource:
     @pytest.mark.asyncio
     async def test_get_sector_performance(self, source):
         src, client = source
-        client._make_request.return_value = [{"sector": "Tech"}]
+        client.get_sector_performance.return_value = [{"sector": "Tech"}]
         result = await src.get_sector_performance()
-        client._make_request.assert_awaited_once()
+        client.get_sector_performance.assert_awaited_once_with()
         assert result == [{"sector": "Tech"}]
 
     @pytest.mark.asyncio

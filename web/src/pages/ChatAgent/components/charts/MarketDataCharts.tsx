@@ -1228,7 +1228,7 @@ export function StockScreenerTable({ data }: DataProps): React.ReactElement {
     { key: 'lastAnnualDividend', label: t('toolArtifact.dividend'), width: 65, format: (v) => v != null ? `$${(v as number).toFixed(2)}` : 'N/A' },
     { key: 'exchangeShortName', label: t('toolArtifact.exchange'), width: 70 },
     { key: 'country', label: t('toolArtifact.country'), width: 55 },
-    { key: 'changes', label: t('toolArtifact.changePct'), width: 70, format: (v) => v != null ? formatPct(v as number) : 'N/A', color: (v) => v != null ? ((v as number) >= 0 ? GREEN : RED) : TEXT_COLOR },
+    { key: 'change', label: t('toolArtifact.changePct'), width: 70, format: (v) => v != null ? formatPct(v as number) : 'N/A', color: (v) => v != null ? ((v as number) >= 0 ? GREEN : RED) : TEXT_COLOR },
   ];
 
   const SortArrow = ({ col }: { col: string }): React.ReactElement | null => {

@@ -168,11 +168,9 @@ def _get_profile(symbol: str) -> list[dict[str, Any]]:
         "ceo": None,
         "fullTimeEmployees": info.get("fullTimeEmployees"),
         "ipoDate": None,
-        "mktCap": fi.get("marketCap"),
+        "marketCap": fi.get("marketCap"),
         "price": float(fi.get("lastPrice", 0) or 0) or None,
-        "volAvg": fi.get("threeMonthAverageVolume"),
         "beta": info.get("beta"),
-        "lastDiv": info.get("dividendRate"),
     }
     return [{k: _clean_value(v) for k, v in profile.items()}]
 
@@ -499,7 +497,7 @@ def _screen_stocks_sync(**filters: Any) -> list[dict[str, Any]]:
             "sector": q.get("sector"),
             "beta": _clean_value(q.get("beta")),
             "volume": _clean_value(q.get("regularMarketVolume")),
-            "changes": _clean_value(q.get("regularMarketChangePercent")),
+            "change": _clean_value(q.get("regularMarketChangePercent")),
         })
     return output
 

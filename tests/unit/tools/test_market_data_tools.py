@@ -320,7 +320,7 @@ class TestFetchCompanyOverview:
             "companyName": "Apple Inc.",
             "sector": "Technology",
             "industry": "Consumer Electronics",
-            "mktCap": 3_500_000_000_000,
+            "marketCap": 3_500_000_000_000,
             "price": 235.50,
             "exchangeShortName": "NASDAQ",
             "pe": 32.5,
@@ -333,7 +333,7 @@ class TestFetchCompanyOverview:
             income_stmt=[{
                 "date": "2025-06-30",
                 "period": "Q3",
-                "calendarYear": "2025",
+                "fiscalYear": "2025",
                 "revenue": 94_000_000_000,
                 "netIncome": 23_000_000_000,
                 "grossProfit": 44_000_000_000,
@@ -614,7 +614,7 @@ class TestFetchStockScreener:
                 "sector": "Technology",
                 "beta": 1.24,
                 "volume": 55_000_000,
-                "changes": 2.30,
+                "change": 2.30,
             },
             {
                 "symbol": "MSFT",
@@ -624,7 +624,7 @@ class TestFetchStockScreener:
                 "sector": "Technology",
                 "beta": 0.93,
                 "volume": 25_000_000,
-                "changes": -1.50,
+                "change": -1.50,
             },
         ]
         provider, financial = self._make_screener_provider(results)

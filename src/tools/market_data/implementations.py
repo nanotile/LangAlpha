@@ -115,9 +115,9 @@ def _build_fiscal_period_lookup(income_stmt: List[Dict]) -> Dict[str, str]:
     for stmt in income_stmt:
         stmt_date = stmt.get("date")
         period = stmt.get("period")  # Q1, Q2, Q3, Q4
-        calendar_year = stmt.get("calendarYear")
-        if stmt_date and period and calendar_year:
-            lookup[stmt_date] = f"{period} FY{calendar_year}"
+        fiscal_year = stmt.get("fiscalYear")
+        if stmt_date and period and fiscal_year:
+            lookup[stmt_date] = f"{period} FY{fiscal_year}"
     return lookup
 
 
@@ -1219,7 +1219,7 @@ No data found for symbol {symbol}"""
         company_name = profile.get("companyName", symbol)
         sector = profile.get("sector", "N/A")
         industry = profile.get("industry", "N/A")
-        market_cap = profile.get("mktCap")
+        market_cap = profile.get("marketCap")
         price = profile.get("price")
         exchange = profile.get("exchangeShortName", "N/A")
 
@@ -1692,7 +1692,7 @@ No data found for symbol {symbol}"""
             # Show latest 10-K (annual report that includes Q4)
             if filings_10k:
                 for filing in filings_10k[:1]:  # Just the latest
-                    filing_date = filing.get("fillingDate", "N/A")
+                    filing_date = filing.get("filingDate", "N/A")
                     if filing_date and " " in filing_date:
                         filing_date = filing_date.split(" ")[0]  # Remove time part
 
@@ -1715,7 +1715,7 @@ No data found for symbol {symbol}"""
             # Show latest 10-Q filings
             if filings_10q:
                 for filing in filings_10q[:3]:  # Last 3 quarterly reports
-                    filing_date = filing.get("fillingDate", "N/A")
+                    filing_date = filing.get("filingDate", "N/A")
                     if filing_date and " " in filing_date:
                         filing_date = filing_date.split(" ")[0]
 
@@ -2873,7 +2873,7 @@ async def fetch_stock_screener(
             sect = stock.get("sector", "N/A")
             beta = stock.get("beta")
             volume = stock.get("volume")
-            change = stock.get("changes")
+            change = stock.get("change")
 
             price_str = f"${price:.2f}" if price is not None else "N/A"
             cap_str = format_number(mkt_cap) if mkt_cap is not None else "N/A"
