@@ -143,6 +143,12 @@ class BackgroundTask:
     spawned_turn_index: int = 0
     """The turn_index of the parent turn that spawned this subagent."""
 
+    spawned_run_id: str | None = None
+    """The run_id of the parent turn that spawned this subagent. Set from
+    ``registry.current_run_id`` at register time. Collectors filter by this
+    so subagents from prior turns can't get claimed by a later turn's
+    collector after the registry is reused across turns."""
+
     per_call_records: list[dict[str, Any]] = field(default_factory=list)
     """Token usage records collected when subagent completes."""
 
@@ -202,6 +208,7 @@ class BackgroundTaskRegistry:
         self._lock = asyncio.Lock()
         self._results: dict[str, Any] = {}
         self.current_turn_index: int = 0
+        self.current_run_id: str | None = None
         self.thread_id: str = thread_id
 
     async def register(
@@ -227,6 +234,7 @@ class BackgroundTaskRegistry:
                 asyncio_task=asyncio_task,
                 agent_id=agent_id,
                 spawned_turn_index=self.current_turn_index,
+                spawned_run_id=self.current_run_id,
             )
             self._tasks[tool_call_id] = task
             self._task_id_to_tool_call_id[task_id] = tool_call_id
@@ -860,6 +868,26 @@ class BackgroundTaskRegistry:
             logger.info("Cancelled background tasks", count=cancelled, force=force)
 
         return cancelled
+
+    async def remove_task(self, tool_call_id: str) -> None:
+        """Remove a single task's registry entry and its lookup mappings.
+
+        Called by the BTM collector after ``_await_drain_and_cleanup_tasks``
+        finishes so the registry doesn't grow unboundedly across many turns
+        on a long-lived thread.
+        """
+        async with self._lock:
+            task = self._tasks.pop(tool_call_id, None)
+            if task is None:
+                return
+            self._task_id_to_tool_call_id.pop(task.task_id, None)
+            self._results.pop(tool_call_id, None)
+            stale_ns = [
+                ns for ns, tid in self._ns_uuid_to_tool_call_id.items()
+                if tid == tool_call_id
+            ]
+            for ns in stale_ns:
+                del self._ns_uuid_to_tool_call_id[ns]
 
     def clear(self) -> None:
         """Clear all tasks and results from the registry.

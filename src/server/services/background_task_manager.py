@@ -882,6 +882,13 @@ class BackgroundTaskManager:
                 f"for thread_id={thread_id}: {exc}"
             )
 
+        # Look up the per-thread registry once so we can evict each task's
+        # dict entry after its cleanup completes. Without this, _tasks grows
+        # unboundedly across turns on a long-lived thread (every subagent
+        # ever spawned stays referenced forever).
+        from src.server.services.background_registry_store import BackgroundRegistryStore
+        bg_registry = await BackgroundRegistryStore.get_instance().get_registry(thread_id)
+
         for task in tasks:
             task.per_call_records = []
             task.asyncio_task = None
@@ -916,6 +923,15 @@ class BackgroundTaskManager:
                     "redis_write_failed": getattr(task, "redis_write_failed", False),
                 },
             )
+
+            if bg_registry is not None:
+                try:
+                    await bg_registry.remove_task(task.tool_call_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"[SubagentCleanup] remove_task failed for "
+                        f"thread_id={thread_id} task_id={task.task_id}: {exc}"
+                    )
 
     async def _collect_orphaned_subagent_results(
         self,
@@ -1212,12 +1228,22 @@ class BackgroundTaskManager:
         bg_registry = await bg_store.get_registry(thread_id)
         if bg_registry:
             tasks_to_collect = []
-            for t in bg_registry._tasks.values():
-                if t.collector_response_id:
-                    continue
-                if t.is_pending or t.captured_event_count > 0 or t.per_call_records:
-                    t.collector_response_id = response_id
-                    tasks_to_collect.append(t)
+            # Hold the registry lock during claim so two concurrent collectors
+            # (e.g., orphan from prior turn + current turn) can't both observe
+            # collector_response_id is None for the same task and double-claim.
+            async with bg_registry._lock:
+                for t in bg_registry._tasks.values():
+                    if t.collector_response_id:
+                        continue
+                    # Filter by spawned_run_id: only claim subagents spawned
+                    # by THIS turn. None matches as a compat shim for tasks
+                    # registered before run_id stamping shipped — remove the
+                    # None branch in the next deploy.
+                    if t.spawned_run_id is not None and t.spawned_run_id != run_id:
+                        continue
+                    if t.is_pending or t.captured_event_count > 0 or t.per_call_records:
+                        t.collector_response_id = response_id
+                        tasks_to_collect.append(t)
             if tasks_to_collect:
                 handler = metadata.get("handler")
                 sse_events = handler.get_sse_events() if handler else []
@@ -1477,12 +1503,18 @@ class BackgroundTaskManager:
             timeout = get_subagent_collector_timeout()
 
         try:
-            all_tasks = []
-            for t in bg_registry._tasks.values():
-                if t.collector_response_id:
-                    continue
-                t.collector_response_id = response_id
-                all_tasks.append(t)
+            # Same identity-safe claim as _mark_completed: hold the registry
+            # lock and filter by spawned_run_id so concurrent collectors can't
+            # double-claim and prior-turn subagents can't leak into this turn.
+            async with bg_registry._lock:
+                all_tasks = []
+                for t in bg_registry._tasks.values():
+                    if t.collector_response_id:
+                        continue
+                    if t.spawned_run_id is not None and t.spawned_run_id != response_id:
+                        continue
+                    t.collector_response_id = response_id
+                    all_tasks.append(t)
 
             for task in all_tasks:
                 if not task.completed and task.asyncio_task and task.asyncio_task.done():

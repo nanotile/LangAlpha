@@ -519,6 +519,11 @@ async def astream_ptc_workflow(
             effective_plan_mode = False
             background_registry = await registry_store.get_or_create_registry(thread_id)
 
+        # Stamp the current turn's run_id on the registry so newly-registered
+        # subagents inherit it (spawned_run_id). The collector filters by this
+        # to avoid claiming subagents that belong to prior turns.
+        background_registry.current_run_id = run_id
+
         # Build graph with the workspace's session
         # Note: agent.md is injected dynamically by WorkspaceContextMiddleware
         # on every model call, ensuring it's always the latest content.
