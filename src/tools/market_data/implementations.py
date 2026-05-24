@@ -2559,6 +2559,7 @@ async def fetch_sector_performance(
 
         # Generate file-ready header
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        requested_date = date or datetime.now(timezone.utc).date().isoformat()
         date_str = f" ({date})" if date else ""
         header = f"""## Sector Performance Analysis{date_str}
 **Retrieved:** {timestamp}
@@ -2575,7 +2576,17 @@ async def fetch_sector_performance(
                 )
                 if results:
                     logger.debug(f"Retrieved performance data for {len(results)} sectors")
-                    content = header + _format_sectors_as_table(results)
+                    actual_date = results[0].get("date") if isinstance(results[0], dict) else None
+                    if actual_date and actual_date != requested_date:
+                        fallback_notice = (
+                            f"> ⚠️ **No data for {requested_date}** "
+                            f"(weekend / holiday / not yet published). "
+                            f"Showing the most recent available trading day: "
+                            f"**{actual_date}**.\n\n"
+                        )
+                        content = header + fallback_notice + _format_sectors_as_table(results)
+                    else:
+                        content = header + _format_sectors_as_table(results)
                     return content, _build_sector_artifact(results)
             except Exception:
                 logger.exception("Sector performance provider call failed")

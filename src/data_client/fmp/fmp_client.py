@@ -7,7 +7,7 @@ see :func:`_format_sector_change_pct`.
 import json
 import os
 from collections import OrderedDict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -16,14 +16,13 @@ _CACHE_MAX_SIZE = 512
 
 
 def _format_sector_change_pct(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Render sector snapshot's numeric ``averageChange`` as a percentage string.
+    """Render sector snapshot's ``averageChange`` as a percentage string.
 
-    Stable returns ``averageChange`` as a float (e.g. ``-0.0011647``); this is
-    the canonical shape this codebase uses for sector daily change at the data
-    boundary — a percentage string like ``"-0.11647%"`` under ``changePctStr``.
-    Sector consumers downstream parse it back to a numeric for the artifact /
-    UI under the separate ``changePercentage`` key, so the string here lives
-    alongside the numeric without ambiguity.
+    Stable returns ``averageChange`` as a float already in percent units (e.g.
+    ``1.42832`` means 1.43%, not 142%); the canonical shape downstream parses
+    is the same value as a percentage string under ``changePctStr`` (e.g.
+    ``"1.42832%"``). The numeric copy survives on the artifact under
+    ``changePercentage``, so string and numeric live alongside without ambiguity.
     """
     if "averageChange" in row and "changePctStr" not in row:
         val = row["averageChange"]
@@ -662,20 +661,33 @@ class FMPClient:
     async def get_sector_performance(
         self, target_date: Optional[str] = None
     ) -> List[Dict]:
-        """Daily snapshot of US sector performance.
+        """Daily snapshot of US sector performance (NASDAQ-listed names).
 
-        Stable's ``sector-performance-snapshot?date=`` requires a date —
-        defaults to today. The numeric ``averageChange`` is also rendered
-        as a percentage string under ``changePctStr`` (see
-        :func:`_format_sector_change_pct`) — that's the canonical shape
-        sector consumers parse.
+        Stable's ``sector-performance-snapshot?date=`` requires a date and
+        returns ``[]`` on weekends/holidays; when no date is supplied we walk
+        back up to 7 calendar days to find the most recent trading day, which
+        matches v3's implicit "latest available" behaviour. The numeric
+        ``averageChange`` is rendered as a percentage string under
+        ``changePctStr`` (see :func:`_format_sector_change_pct`).
+
+        The endpoint is per-exchange and defaults to NASDAQ-listed constituents
+        only — the same scope v3's ``sectors-performance`` returned.
         """
-        if not target_date:
-            target_date = date.today().isoformat()
-        data = await self._make_request(
-            "sector-performance-snapshot", params={"date": target_date}
-        )
-        return [_format_sector_change_pct(row) for row in (data or [])]
+        if target_date:
+            data = await self._make_request(
+                "sector-performance-snapshot", params={"date": target_date}
+            )
+            return [_format_sector_change_pct(row) for row in (data or [])]
+
+        today = datetime.now(timezone.utc).date()
+        for offset in range(7):
+            probe = (today - timedelta(days=offset)).isoformat()
+            data = await self._make_request(
+                "sector-performance-snapshot", params={"date": probe}
+            )
+            if data:
+                return [_format_sector_change_pct(row) for row in data]
+        return []
 
     # =====================================================================
     # Technical Indicators
