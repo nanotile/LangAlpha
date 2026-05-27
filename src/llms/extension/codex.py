@@ -128,6 +128,9 @@ def _install_responses_output_guard() -> None:
     patch the single chokepoint all read paths (sync, async, streaming) funnel
     through. Streamed text is already captured from ``output_text.delta`` events,
     so an empty terminal output loses no content.
+
+    Remove once langchain_openai guards ``response.output`` upstream — the guard
+    then becomes a no-op (it only mutates when ``output`` is None).
     """
     try:
         import langchain_openai.chat_models.base as _base
@@ -152,6 +155,9 @@ def _install_responses_output_guard() -> None:
             try:
                 response.output = []
             except Exception:
+                # Response isn't frozen today, so the line above succeeds. Kept as
+                # insurance: a frozen SDK model would raise pydantic ValidationError
+                # (not TypeError), and object.__setattr__ bypasses the frozen check.
                 object.__setattr__(response, "output", [])
         return orig(response, *args, **kwargs)
 
