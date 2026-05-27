@@ -1,6 +1,5 @@
 """Tests for ChatCodexOpenAI system message → instructions promotion."""
 
-import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.llms.extension.codex import ChatCodexOpenAI
@@ -73,6 +72,44 @@ class TestSystemToInstructions:
         payload = llm._get_request_payload(messages)
 
         assert payload["instructions"] == "Dynamic prompt\n\nstatic placeholder"
+
+
+class TestNullOutputGuard:
+    """chatgpt.com Codex backend ships response.output=null on terminal stream
+    frames. langchain_openai iterates it unguarded and raises
+    TypeError('NoneType' object is not iterable). Importing the codex extension
+    installs a guard that coerces null output to [] before iteration.
+    """
+
+    def _null_output_response(self):
+        from openai.types.responses import Response
+
+        # Exactly what langchain's _coerce_chunk_response yields for a terminal
+        # frame whose output is null (non-validating model_construct).
+        return Response.model_construct(
+            id="resp_test", created_at=0.0, model="gpt-5.3-codex",
+            object="response", status="completed", error=None, usage=None,
+            incomplete_details=None, output=None, parallel_tool_calls=False,
+            tool_choice="auto", tools=[], metadata={},
+        )
+
+    def test_null_output_does_not_crash(self):
+        import langchain_openai.chat_models.base as base
+
+        # Without the guard this raises TypeError('NoneType' object is not iterable).
+        result = base._construct_lc_result_from_responses_api(
+            self._null_output_response()
+        )
+        assert result.generations[0].message.content in ("", [])
+
+    def test_guard_installed_and_idempotent(self):
+        import langchain_openai.chat_models.base as base
+        from src.llms.extension.codex import _install_responses_output_guard
+
+        fn = base._construct_lc_result_from_responses_api
+        assert getattr(fn, "_codex_output_guarded", False) is True
+        _install_responses_output_guard()  # re-running must be a no-op
+        assert base._construct_lc_result_from_responses_api is fn
 
 
 class TestStatelessIdSanitization:
