@@ -13,7 +13,10 @@ from uuid import uuid4
 
 from src.server.database import automation as auto_db
 from src.server.models.automation import PriceTriggerConfig, RetriggerMode
+from src.server.database.api_keys import is_byok_active
+from src.server.database.oauth_tokens import has_any_oauth_token
 from src.server.database.workspace import get_or_create_flash_workspace
+from src.server.dependencies.usage_limits import enforce_credit_limit
 from src.server.models.chat import ChatMessage, ChatRequest
 from src.server.services.webhook_client import WebhookClient
 from src.observability import automation_executions, safe_add
@@ -100,9 +103,13 @@ class AutomationExecutor:
         )
 
         thread_id = None
+        workspace_id = None
         try:
+            # ─── Credential check + credit gate ───────────────────
+            has_cred = await is_byok_active(user_id) or await has_any_oauth_token(user_id)
+            await enforce_credit_limit(user_id, byok=has_cred)
+
             # ─── Resolve workspace ─────────────────────────────────
-            workspace_id = None
             if agent_mode == "flash":
                 flash_ws = await get_or_create_flash_workspace(user_id)
                 workspace_id = str(flash_ws["workspace_id"])
@@ -160,6 +167,7 @@ class AutomationExecutor:
                     run_id=run_id,
                     user_input=instruction,
                     user_id=user_id,
+                    is_byok=has_cred,
                 )
             else:
                 generator = astream_ptc_workflow(
@@ -169,6 +177,7 @@ class AutomationExecutor:
                     user_input=instruction,
                     user_id=user_id,
                     workspace_id=workspace_id,
+                    is_byok=has_cred,
                 )
 
             # Notify webhooks: started
@@ -245,7 +254,9 @@ class AutomationExecutor:
                 completed_at=datetime.now(timezone.utc),
             )
 
-            # Increment failure count (may auto-disable)
+            # Increment failure count (may auto-disable). A credit-gate 429 from
+            # enforce_credit_limit lands here too — intentionally counted as a
+            # failure so a persistently zero-credit automation auto-disables.
             await auto_db.increment_failure_count(automation_id)
 
             # Restore price automations from 'executing' to 'active' on failure
