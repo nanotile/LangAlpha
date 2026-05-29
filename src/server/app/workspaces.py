@@ -290,20 +290,29 @@ async def workspace_status_events(workspace_id: str, x_user_id: CurrentUserId):
                     # spinner even when a background warm (not this client's
                     # chat) owns the start.
                     sandbox_state = payload.get("sandbox_state")
+                    hinted = payload.get("status")
                     if (
                         sandbox_state
                         and sandbox_state != last_sandbox_state
                         and last_status not in _EVENTS_TERMINAL
                     ):
                         last_sandbox_state = sandbox_state
+                        # Pair the refinement with the payload's own status, not
+                        # the cached last_status. A publish can carry
+                        # {status:'starting', sandbox_state:'archived'} while
+                        # reconcile() still has last_status on 'stopped' (the
+                        # 'starting' publish raced ahead of its commit). Emitting
+                        # 'stopped' here makes the FE drop the archived hint, and
+                        # the follow-up plain 'starting' (from reconcile) carries
+                        # no refinement — so the slow-restore spinner is lost.
+                        event_status = hinted if isinstance(hinted, str) else last_status
                         yield _sse_status_event(
-                            workspace_id, last_status, sandbox_state=sandbox_state
+                            workspace_id, event_status, sandbox_state=sandbox_state
                         )
                     # Treat the status hint as advisory only. A publish can race
                     # ahead of its transaction commit (or be spurious), and a
                     # terminal status closes the stream — so confirm against the
                     # authoritative DB row (via reconcile) before trusting it.
-                    hinted = payload.get("status")
                     if not hinted or hinted == last_status:
                         continue
                     event, close = await reconcile()

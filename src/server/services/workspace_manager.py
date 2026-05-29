@@ -1287,7 +1287,20 @@ class WorkspaceManager:
                     f"Phase 2 sync transient for workspace {workspace_id} "
                     f"(will retry next request): {e}"
                 )
+                # Capture before reverting — the revert clears _pending_lazy_sync.
+                was_unpromoted_lazy = workspace_id in self._pending_lazy_sync
                 await self._revert_unpromoted_lazy_start(workspace_id)
+                if was_unpromoted_lazy:
+                    # We just reverted this lazy start's row to 'stopped'. The
+                    # sandbox is healthy (has_failed() was False), but returning
+                    # the session now hands the caller a sandbox the DB says is
+                    # 'stopped' — other workers would claim and spawn a second
+                    # one (split-brain). Surface the transient so the caller
+                    # re-claims cleanly, mirroring the generic Exception branch.
+                    raise
+                # Already-'running' re-sync hit a transient; the sandbox was
+                # usable before this periodic sync, so keep the cached session
+                # and let the next request retry.
             except asyncio.CancelledError:
                 # A client disconnect or server shutdown mid-Phase-2 cancels
                 # this coroutine. CancelledError is a BaseException, so without
