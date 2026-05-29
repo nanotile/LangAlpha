@@ -123,12 +123,17 @@ export async function streamWorkspaceEvents(
       buffer = chunks.pop() ?? '';
       for (const chunk of chunks) {
         let eventType = '';
-        let data = '';
+        const dataLines: string[] = [];
         for (const raw of chunk.split('\n')) {
           if (raw.startsWith('event:')) eventType = raw.slice(6).trim();
-          else if (raw.startsWith('data:')) data += raw.slice(5).trim();
+          else if (raw.startsWith('data:')) dataLines.push(raw.slice(5).trim());
           // Comments (lines starting with ':') and unknown fields ignored.
         }
+        // Per the SSE spec, multiple data: lines join with a newline. The
+        // backend emits single-line json.dumps payloads, so this is one line in
+        // practice — but joining correctly keeps a multi-line payload parseable
+        // instead of silently corrupting the JSON.
+        const data = dataLines.join('\n');
         if (eventType === 'status' && data) {
           try {
             const parsed = JSON.parse(data) as {
