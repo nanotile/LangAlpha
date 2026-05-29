@@ -123,7 +123,10 @@ jobs:
     # pulled from MCR. This removes the `playwright install` download step,
     # whose post-download hang (Chromium fetch reaches 100% then stalls during
     # extraction / next-artifact fetch from cdn.playwright.dev) was hanging CI.
-    # KEEP THIS TAG IN SYNC with "@playwright/test" in web/package.json.
+    # KEEP THIS TAG IN SYNC with the @playwright/test version resolved in
+    # web/pnpm-lock.yaml (package.json uses a ^ range, so the lockfile is the
+    # source of truth). A mismatch makes playwright test fail on a browser/
+    # library version error.
     container:
       image: mcr.microsoft.com/playwright:v1.58.2-noble
     defaults:
@@ -131,12 +134,12 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: latest
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright test
       - uses: actions/upload-artifact@v4
