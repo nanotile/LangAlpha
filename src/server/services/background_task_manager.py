@@ -1777,6 +1777,10 @@ class BackgroundTaskManager:
             task_info.status = TaskStatus.CANCELLED
             task_info.completed_at = datetime.now()
             metadata = task_info.metadata
+            # Only user-driven cancels set explicit_cancel; system force-cancels
+            # (shutdown timeout, abandoned-task cleanup) reach here via task.cancel()
+            # with the flag unset and must not be persisted as user actions.
+            cancelled_by_user = bool(task_info.explicit_cancel)
 
         logger.debug(f"[BackgroundTaskManager] Marked as cancelled: {key}")
 
@@ -1814,7 +1818,7 @@ class BackgroundTaskManager:
                     "agent_llm_preset": metadata.get("agent_llm_preset", "default"),
                     "deepthinking": metadata.get("deepthinking", False),
                     "is_byok": metadata.get("is_byok", False),
-                    "cancelled_by_user": True,
+                    "cancelled_by_user": cancelled_by_user,
                 }
 
                 await persistence_service.persist_cancelled(
