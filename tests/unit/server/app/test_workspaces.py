@@ -516,9 +516,11 @@ async def test_start_workspace_lazy_returns_202_and_schedules(client):
         assert body["status"] == "starting"
         assert body["workspace_id"] == ws["workspace_id"]
 
-        # The background task should have started but not finished — yield once.
-        await asyncio.sleep(0)
-        assert started_event.is_set(), "background task was not scheduled"
+        # The background task should have started but not finished. Wait on the
+        # event directly rather than a single scheduler tick (asyncio.sleep(0)),
+        # which can flake under load if the task needs more than one tick to
+        # reach started_event.set().
+        await asyncio.wait_for(started_event.wait(), timeout=0.5)
 
         # Let the task complete so it doesn't leak into other tests.
         finish_event.set()
@@ -658,8 +660,12 @@ async def _collect_sse_events(client, url, *, want_events: int, timeout: float =
                         if name == "status" and data:
                             try:
                                 events.append((name, _json.loads(data)))
-                            except Exception:
-                                events.append((name, {}))
+                            except Exception as exc:
+                                # Fail fast — a malformed payload is a real
+                                # serialization regression, not something to mask.
+                                raise AssertionError(
+                                    f"Invalid SSE JSON payload for 'status': {data!r}"
+                                ) from exc
                         elif name == "timeout":
                             events.append((name, {}))
                     if len(events) >= want_events:

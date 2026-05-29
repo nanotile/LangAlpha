@@ -1280,9 +1280,11 @@ from ptc_agent.core.sandbox.runtime import SandboxTransientError  # noqa: E402
 
 
 class TestPhase2ErrorNarrowing:
-    """Phase 2 now distinguishes a failed lazy init (has_failed() == True,
-    clear + re-raise) from a post-init transient (has_failed() == False,
-    swallow + retry next request). Generic Exception keeps the legacy
+    """Phase 2 distinguishes a failed lazy init (has_failed() == True,
+    clear + re-raise) from a post-init transient (has_failed() == False).
+    For an UNPROMOTED lazy start, a post-init transient reverts the row to
+    'stopped' and re-raises so the caller can't return a sandbox behind a
+    'stopped' row (split-brain). Generic Exception keeps the legacy
     best-effort-retry behavior — regression-guarded here."""
 
     def setup_method(self):
@@ -1330,12 +1332,15 @@ class TestPhase2ErrorNarrowing:
     @patch("src.server.services.workspace_manager.SessionManager")
     @patch("src.server.services.workspace_manager.update_workspace_status")
     @patch("src.server.services.workspace_manager.update_workspace_activity")
-    async def test_phase2_transient_post_init_swallowed(
+    async def test_phase2_transient_post_init_lazy_reverts_and_raises(
         self, mock_activity, mock_status, mock_session_mgr, mock_get_ws
     ):
-        """SandboxTransientError after sandbox is ready (e.g., asset sync)
-        leaves the healthy session in cache and is best-effort retried next
-        request. has_failed() == False is the discriminator."""
+        """A post-init transient (e.g. asset sync) on an UNPROMOTED lazy start
+        reverts the row to 'stopped' and re-raises. has_failed() == False, so
+        the sandbox is healthy — but returning the session here would hand back
+        a sandbox the DB says is 'stopped', letting another worker spawn a
+        second one (split-brain). The discriminator is _pending_lazy_sync
+        membership; the deferred-sync asset step is reached only on that path."""
         manager = self._make_manager()
         ws_id = str(uuid.uuid4())
         mock_get_ws.return_value = _make_workspace(
@@ -1351,16 +1356,21 @@ class TestPhase2ErrorNarrowing:
             side_effect=SandboxTransientError("sync blip")
         )
         manager._maybe_restore_files = AsyncMock()
-        manager._pending_lazy_sync.add(ws_id)  # force deferred-sync branch
+        manager._pending_lazy_sync.add(ws_id)  # unpromoted lazy start
         manager._sessions[ws_id] = session
         manager._last_sync_at = {}
         mock_session_mgr.cleanup_session = AsyncMock()
 
-        result = await manager.get_session_for_workspace(ws_id, user_id="user-1")
+        with pytest.raises(SandboxTransientError):
+            await manager.get_session_for_workspace(ws_id, user_id="user-1")
 
-        assert result is session  # still cached, no clear
+        # Row reverted so cross-worker losers re-claim immediately instead of
+        # the caller returning a sandbox behind a 'stopped' row.
+        mock_status.assert_any_await(workspace_id=ws_id, status="stopped")
+        assert ws_id not in manager._pending_lazy_sync
+        # has_failed() was False — the healthy session is left cached (not
+        # cleared); the next request re-claims against the reverted row.
         mock_session_mgr.cleanup_session.assert_not_awaited()
-        assert ws_id in manager._sessions
 
     @pytest.mark.asyncio
     @patch("src.server.services.workspace_manager.db_get_workspace")
