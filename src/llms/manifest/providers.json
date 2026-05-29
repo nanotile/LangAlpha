@@ -691,6 +691,8 @@
         "name": "Qwen3.7 Max",
         "is_reasoning": true,
         "description": "Alibaba's largest and most capable Qwen3.7 Max — flagship agentic model excelling at coding, office/productivity, and long-horizon autonomous execution",
+        "context_window": 1000000,
+        "max_output": 65536,
         "pricing": {
           "input": 1.714,
           "cached_input": 0.343,
@@ -945,6 +947,8 @@
         "name": "Qwen3.7 Max (SG)",
         "is_reasoning": true,
         "description": "Alibaba's Qwen3.7 Max — Singapore international region",
+        "context_window": 1000000,
+        "max_output": 65536,
         "pricing": {
           "input": 2.677,
           "cached_input": 0.535,
