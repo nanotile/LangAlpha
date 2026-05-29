@@ -660,7 +660,11 @@ async def _resolve_role_clients(
     # SIGNAL: by the primitive's invariant OAUTH/BYOK ⟹ llm_client is set, so a
     # main-client copy is safe. PLATFORM/NONE users store nothing → cheap name
     # path stays (a non-BYOK reasoning user's PLATFORM client is NOT copied).
-    if config.credential_source in (CredentialSource.OAUTH, CredentialSource.BYOK):
+    # The explicit None check makes the invariant a guard, not an assumption.
+    if (
+        config.credential_source in (CredentialSource.OAUTH, CredentialSource.BYOK)
+        and config.llm_client is not None
+    ):
         for role in roles:
             if role.fallback_to_main and role.key not in config.subsidiary_llm_clients:
                 config.subsidiary_llm_clients[role.key] = config.llm_client.model_copy()

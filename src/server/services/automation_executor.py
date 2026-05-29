@@ -111,6 +111,10 @@ class AutomationExecutor:
             has_byok, has_oauth = await asyncio.gather(
                 is_byok_active(user_id), has_any_oauth_token(user_id)
             )
+            # has_cred drives the credit gate (BYOK negative-balance vs platform
+            # daily-credit). The workflow's is_byok only controls whether the
+            # BYOK ladder is attempted, so it keys off has_byok alone — passing
+            # has_cred would fire a futile BYOK prefetch for OAuth-only users.
             has_cred = has_byok or has_oauth
             await enforce_credit_limit(user_id, byok=has_cred)
 
@@ -172,7 +176,7 @@ class AutomationExecutor:
                     run_id=run_id,
                     user_input=instruction,
                     user_id=user_id,
-                    is_byok=has_cred,
+                    is_byok=has_byok,
                 )
             else:
                 generator = astream_ptc_workflow(
@@ -182,7 +186,7 @@ class AutomationExecutor:
                     user_input=instruction,
                     user_id=user_id,
                     workspace_id=workspace_id,
-                    is_byok=has_cred,
+                    is_byok=has_byok,
                 )
 
             # Notify webhooks: started

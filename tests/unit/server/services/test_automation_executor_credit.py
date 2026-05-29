@@ -134,7 +134,9 @@ class TestCredentialGate:
 
     @pytest.mark.asyncio
     async def test_oauth_only_user_flash(self):
-        """OAuth-only user: treated as has_cred=True, not mis-gated as platform user."""
+        """OAuth-only user: credit gate sees has_cred=True (not mis-gated as a
+        platform user), but the workflow gets is_byok=False — the BYOK ladder is
+        not attempted for a user with no BYOK keys."""
         patches = _patch_all(is_byok=False, has_oauth=True)
 
         with (
@@ -158,9 +160,11 @@ class TestCredentialGate:
             await executor.execute(automation, _EXEC_ID)
 
         mock_oauth.assert_awaited_once_with(_USER_ID)
+        # Credit gate keys off has_cred (BYOK or OAuth); workflow is_byok keys
+        # off has_byok alone — OAuth-only ⟹ gate byok=True, workflow is_byok=False.
         mock_credit.assert_awaited_once_with(_USER_ID, byok=True)
 
-        _assert_astream_called_with_byok(mock_astream, expected_byok=True)
+        _assert_astream_called_with_byok(mock_astream, expected_byok=False)
 
     @pytest.mark.asyncio
     async def test_no_cred_user_flash(self):
