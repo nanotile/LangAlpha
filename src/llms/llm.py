@@ -107,11 +107,13 @@ class ModelConfig:
         provider = model_info["provider"]
         model_id = model_info["model_id"]
 
-        # Then look up pricing in manifest
-        models = self.manifest["models"].get(provider, [])
-        for model in models:
-            if model["id"] == model_id:
-                return model.get('pricing')
+        # Then look up pricing in manifest. Variant providers (e.g. OAuth) carry
+        # no pricing of their own; fall back to the parent provider's entry so
+        # they inherit the identical price for the same model_id.
+        for prov in (provider, self.get_parent_provider(provider)):
+            for model in self.manifest["models"].get(prov, []):
+                if model["id"] == model_id:
+                    return model.get('pricing')
         return None
 
     def get_model_info(self, provider: str, model_id: str) -> Optional[Dict[str, Any]]:
