@@ -97,25 +97,6 @@ class ModelConfig:
         """Get provider configuration from the flattened provider dict."""
         return self._flat_providers.get(provider, {})
 
-    def get_model_pricing(self, custom_model_name: str) -> Optional[Dict[str, Any]]:
-        """Get pricing information for a specific model from manifest."""
-        # Get model info from llm_config first
-        model_info = self.llm_config.get(custom_model_name)
-        if not model_info:
-            return None
-
-        provider = model_info["provider"]
-        model_id = model_info["model_id"]
-
-        # Then look up pricing in manifest. Variant providers (e.g. OAuth) carry
-        # no pricing of their own; fall back to the parent provider's entry so
-        # they inherit the identical price for the same model_id.
-        for prov in (provider, self.get_parent_provider(provider)):
-            for model in self.manifest["models"].get(prov, []):
-                if model["id"] == model_id:
-                    return model.get('pricing')
-        return None
-
     def get_model_info(self, provider: str, model_id: str) -> Optional[Dict[str, Any]]:
         """Get full model information from manifest by provider and model_id.
 
