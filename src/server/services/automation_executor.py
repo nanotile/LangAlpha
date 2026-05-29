@@ -6,6 +6,7 @@ Builds a ChatRequest, invokes the appropriate agent workflow,
 and drains the async generator (no HTTP client to consume SSE).
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -106,7 +107,11 @@ class AutomationExecutor:
         workspace_id = None
         try:
             # ─── Credential check + credit gate ───────────────────
-            has_cred = await is_byok_active(user_id) or await has_any_oauth_token(user_id)
+            # BYOK and OAuth checks are independent — run concurrently.
+            has_byok, has_oauth = await asyncio.gather(
+                is_byok_active(user_id), has_any_oauth_token(user_id)
+            )
+            has_cred = has_byok or has_oauth
             await enforce_credit_limit(user_id, byok=has_cred)
 
             # ─── Resolve workspace ─────────────────────────────────

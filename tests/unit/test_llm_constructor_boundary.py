@@ -138,6 +138,11 @@ def scan_tree(roots: tuple[str, ...]) -> tuple[list[Violation], list[tuple[str, 
     parse_errors: list[tuple[str, str]] = []
     for root in roots:
         abs_root = os.path.join(REPO_ROOT, root)
+        if not os.path.isdir(abs_root):
+            # A renamed/moved scan root must fail loudly, not silently drop
+            # coverage for that directory.
+            parse_errors.append((root, "scan root does not exist"))
+            continue
         for dirpath, _dirnames, filenames in os.walk(abs_root):
             if "__pycache__" in dirpath.split(os.sep):
                 continue

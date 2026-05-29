@@ -7,6 +7,7 @@ lookups.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -550,24 +551,46 @@ def role_registry(config, enabled_subagents, subagent_defs) -> list[LLMRole]:
     return [r for r in roles if r.model]
 
 
+def _build_roles(config, enabled_subagents: list[str]) -> list[LLMRole]:
+    """Build the role list once, resolving subagent defs through the registry.
+
+    Shared by the BYOK prefetch (so subagent model slugs land in the batch) and
+    the role-client resolver (so the registry is built once, not twice).
+    """
+    try:
+        from ptc_agent.agent.subagents.registry import SubagentRegistry
+
+        registry = SubagentRegistry(user_definitions=config.subagents.definitions)
+        subagent_defs = {name: registry.get(name) for name in enabled_subagents}
+    except Exception:
+        logger.error(
+            "[CHAT] Failed to build subagent registry; skipping subagent roles",
+            exc_info=True,
+        )
+        subagent_defs = {}
+    return role_registry(config, enabled_subagents, subagent_defs)
+
+
 async def _prefetch_byok_cache(
     user_id: str, config, effective_model: str, model_pref: dict,
+    roles: list[LLMRole],
 ) -> dict[str, dict | None]:
     """Best-effort batch BYOK prefetch → tri-state cache for ``_walk_byok_candidates``.
 
-    Gathers candidate provider slugs across the main model, every role model,
-    and every fallback model, issues ONE ``get_byok_configs_for_providers``
-    query, and seeds the cache. Pure perf: every walk is cache-miss-safe (a slug
-    absent from the cache falls back to a direct lookup), so this must never
-    become a correctness dependency. On any error returns ``{}`` — each walk
-    then does its own direct lookup (correct, just unoptimized).
+    Gathers candidate provider slugs across the main model, every role model
+    (compaction / fetch / subagent), and every fallback model, issues ONE
+    ``get_byok_configs_for_providers`` query, and seeds the cache. Pure perf:
+    every walk is cache-miss-safe (a slug absent from the cache falls back to a
+    direct lookup), so this must never become a correctness dependency. On any
+    error returns ``{}`` — each walk then does its own direct lookup (correct,
+    just unoptimized).
     """
     from src.llms.llm import LLM as LLMFactory
 
     try:
         mc = LLMFactory.get_model_config()
         candidate_models = [effective_model]
-        candidate_models += [m for m in (config.llm.compaction, config.llm.fetch) if m]
+        candidate_models += [r.model for r in roles if r.model]
         candidate_models += list(config.llm.fallback or [])
         all_slugs: set[str] = set()
         for m in candidate_models:
@@ -593,7 +616,7 @@ async def _prefetch_byok_cache(
 
 
 async def _resolve_role_clients(
-    config, user_id: str, enabled_subagents: list[str], model_pref: dict,
+    config, user_id: str, roles: list[LLMRole], model_pref: dict,
     byok_cache: dict, *, is_byok: bool, cache_key: str | None,
 ) -> None:
     """Resolve compaction/fetch/subagent role clients onto ``config`` in place.
@@ -602,25 +625,14 @@ async def _resolve_role_clients(
     ``config.llm_client`` are set. Roles never get an eager platform client
     (``allow_platform_fallback=False``); a keyless role for an OAUTH/BYOK user
     is seeded with a copy of the main client (BYOK-pure), while PLATFORM/NONE
-    users store nothing so the cheap name-based path stays.
+    users store nothing so the cheap name-based path stays. Each role's I/O
+    (OAuth check + BYOK walk) runs concurrently; writes happen after the gather
+    so the SSE hot path waits one round-trip, not N.
     """
-    try:
-        from ptc_agent.agent.subagents.registry import SubagentRegistry
 
-        registry = SubagentRegistry(user_definitions=config.subagents.definitions)
-        subagent_defs = {name: registry.get(name) for name in enabled_subagents}
-    except Exception:
-        logger.error(
-            "[CHAT] Failed to build subagent registry; skipping subagent roles",
-            exc_info=True,
-        )
-        subagent_defs = {}
-
-    roles = role_registry(config, enabled_subagents, subagent_defs)
-
-    for role in roles:
+    async def _resolve_one(role: LLMRole):
         try:
-            rc = await resolve_model_client(
+            return role, await resolve_model_client(
                 user_id, role.model, is_byok=is_byok, cache_key=cache_key,
                 allow_platform_fallback=False, service_tier=None,
                 _pref_cache=model_pref, _byok_cache=byok_cache,
@@ -630,6 +642,10 @@ async def _resolve_role_clients(
                 "[CHAT] Failed to resolve role %s model %s, skipping",
                 role.key, role.model, exc_info=True,
             )
+            return role, None
+
+    for role, rc in await asyncio.gather(*(_resolve_one(r) for r in roles)):
+        if rc is None:
             continue
         if rc.client is not None:
             config.subsidiary_llm_clients[role.key] = rc.client
@@ -669,11 +685,9 @@ async def _resolve_fallback_clients(
     if not fallback_models:
         return
 
-    merged_fallbacks = []
-    byok_count = 0
-    for model_name in fallback_models:
+    async def _resolve_one(model_name: str):
         try:
-            fc = await resolve_model_client(
+            return model_name, await resolve_model_client(
                 user_id, model_name, is_byok=is_byok, cache_key=cache_key,
                 allow_platform_fallback=True,
                 _pref_cache=model_pref, _byok_cache=byok_cache,
@@ -683,6 +697,15 @@ async def _resolve_fallback_clients(
                 "[CHAT] Failed to resolve fallback model %s, skipping",
                 model_name, exc_info=True,
             )
+            return model_name, None
+
+    merged_fallbacks = []
+    byok_count = 0
+    # Resolve concurrently; append in declared order to preserve fallback priority.
+    for model_name, fc in await asyncio.gather(
+        *(_resolve_one(m) for m in fallback_models)
+    ):
+        if fc is None:
             continue
         if fc.client is not None:
             merged_fallbacks.append(fc.client)
@@ -892,9 +915,12 @@ async def resolve_llm_config(
         effective_fast = model_pref.get("fast_mode")
     effective_service_tier = "priority" if effective_fast else None
 
+    # Build the role list once (shared by the prefetch and the resolver below).
+    roles = _build_roles(config, _enabled_subagents)
+
     # STEP 0 — best-effort batch BYOK prefetch (pure perf; see helper docstring).
     byok_cache: dict[str, dict | None] = (
-        await _prefetch_byok_cache(user_id, config, effective_model, model_pref)
+        await _prefetch_byok_cache(user_id, config, effective_model, model_pref, roles)
         if is_byok
         else {}
     )
@@ -927,14 +953,18 @@ async def resolve_llm_config(
         config.cache_key = thread_id
 
     # Subsidiary role clients (compaction / fetch / subagent:*) + BYOK-pure
-    # materialization, then fallback models. Both resolve through the primitive.
-    await _resolve_role_clients(
-        config, user_id, _enabled_subagents, model_pref, byok_cache,
-        is_byok=is_byok, cache_key=thread_id,
-    )
-    await _resolve_fallback_clients(
-        config, user_id, model_pref, byok_cache,
-        is_byok=is_byok, cache_key=thread_id,
+    # materialization, and fallback models. Both resolve through the primitive
+    # and write disjoint config fields (subsidiary_llm_clients vs
+    # fallback_llm_clients), so they run concurrently.
+    await asyncio.gather(
+        _resolve_role_clients(
+            config, user_id, roles, model_pref, byok_cache,
+            is_byok=is_byok, cache_key=thread_id,
+        ),
+        _resolve_fallback_clients(
+            config, user_id, model_pref, byok_cache,
+            is_byok=is_byok, cache_key=thread_id,
+        ),
     )
 
     return config
