@@ -725,6 +725,14 @@ export function useChatMessages(
       newMessagesStartIndexRef.current = 0;
       setMessages((prev) => prev.filter((m) => !m.isHistory));
 
+      // Fresh attach (refresh or thread switch): clear the live-stream cursor so
+      // the subsequent reconnect replays the run's stream from the start. We
+      // hold no live events yet, and the replay id-space must not leak into the
+      // live reconnect (see the note in the replay handler below). The
+      // mid-stream disconnect-retry path does NOT call this loader, so its
+      // resume cursor is preserved.
+      lastEventIdRef.current = null;
+
       const threadIdToUse = threadId;
       console.log('[History] Loading history for thread:', threadIdToUse);
 
@@ -754,10 +762,15 @@ export function useChatMessages(
         const hasRole = event.role !== undefined;
         const hasPairIndex = event.turn_index !== undefined;
 
-        // Track last event ID so reconnectToStream can deduplicate
-        if (event._eventId != null) {
-          lastEventIdRef.current = event._eventId;
-        }
+        // NOTE: do NOT write `event._eventId` into `lastEventIdRef` here.
+        // Replay (`/messages/replay`) numbers events with a cumulative
+        // per-thread counter, while the live workflow stream
+        // (`workflow:stream:{tid}:{rid}`) resets its ids to 1 per run. After a
+        // refresh, carrying the replay cursor into the live reconnect overshoots
+        // the run's id space — the backend's XREAD blocks forever and the stream
+        // delivers zero events (frozen response). `lastEventIdRef` must only ever
+        // track ids received on the LIVE stream (set in the streaming
+        // `processEvent` handler); history dedup uses deterministic bubble ids.
 
         // compaction_chunk is the side channel for LLM output from the
         // compaction middleware (bracketed by context_window summarize
