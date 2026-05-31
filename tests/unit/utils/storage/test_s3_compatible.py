@@ -85,6 +85,27 @@ def test_addressing_style_env_override(monkeypatch):
     assert captured["config"].s3 == {"addressing_style": "path"}
 
 
+def test_addressing_style_trims_and_rejects_invalid(monkeypatch):
+    """Whitespace is stripped; unrecognized values fall back to virtual."""
+
+    def addressing_for(value):
+        monkeypatch.setenv("STORAGE_ADDRESSING_STYLE", value)
+        mod = _reload_module()
+        mod._reset_client_for_test()
+        captured: dict = {}
+
+        def fake_client(*_args, **kwargs):
+            captured["config"] = kwargs.get("config")
+            return object()
+
+        with patch.object(mod.boto3, "client", side_effect=fake_client):
+            mod._get_client()
+        return captured["config"].s3
+
+    assert addressing_for("  path  ") == {"addressing_style": "path"}
+    assert addressing_for("bogus") == {"addressing_style": "virtual"}
+
+
 # --- E2E timeout → upload error mapping ----------------------------------
 # The Config(...) wiring above is necessary but not sufficient. These tests
 # go through the real upload_bytes() path so we verify both halves:
