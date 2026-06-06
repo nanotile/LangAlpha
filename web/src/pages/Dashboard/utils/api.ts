@@ -72,6 +72,7 @@ interface NewsParams {
   tickers?: string[];
   limit?: number;
   cursor?: string;
+  provider?: string;
 }
 
 interface NewsResponse {
@@ -540,12 +541,13 @@ export async function disconnectClaudeOAuth(): Promise<Record<string, unknown>> 
  * @param {{ tickers?: string[], limit?: number, cursor?: string }} opts
  * @returns {Promise<{ results: Array, count: number, next_cursor: string|null }>}
  */
-export async function getNews({ tickers, limit = 20, cursor }: NewsParams = {}): Promise<NewsResponse> {
+export async function getNews({ tickers, limit = 20, cursor, provider }: NewsParams = {}): Promise<NewsResponse> {
   try {
     const params: Record<string, string | number> = {};
     if (tickers && tickers.length) params.tickers = tickers.join(',');
     if (limit) params.limit = limit;
     if (cursor) params.cursor = cursor;
+    if (provider) params.provider = provider;
     const { data } = await api.get('/api/v1/news', { params });
     return data || { results: [], count: 0, next_cursor: null };
   } catch (e: unknown) {

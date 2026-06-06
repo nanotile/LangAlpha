@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query';
+import { useMemo } from 'react';
 import i18n from '@/i18n';
 import { getNews, getIndices, INDEX_SYMBOLS, fallbackIndex, normalizeIndexSymbol } from '../utils/api';
 import { fetchMarketStatus } from '@/lib/marketUtils';
@@ -11,16 +12,28 @@ interface MarketStatusData {
   [key: string]: unknown;
 }
 
+interface NewsSentimentItem {
+  ticker: string;
+  sentiment: string;
+  reasoning?: string;
+}
+
 interface NewsItem {
   id: string;
   title: string;
   time: string;
+  publishedAt: string | null;
   isHot: boolean;
   source: string;
   favicon: string | null;
   image: string | null;
   tickers: string[];
   articleUrl?: string | null;
+  // Inlined article body — lets the detail modal render without a by-id fetch.
+  author?: string | null;
+  description?: string | null;
+  keywords?: string[];
+  sentiments?: NewsSentimentItem[] | null;
 }
 
 interface DashboardData {
@@ -28,8 +41,32 @@ interface DashboardData {
   indicesLoading: boolean;
   newsItems: NewsItem[];
   newsLoading: boolean;
+  curatedItems: NewsItem[];
+  curatedLoading: boolean;
+  curatedHasNextPage: boolean;
+  curatedIsFetchingNextPage: boolean;
+  curatedFetchNextPage: () => void;
   marketStatus: MarketStatusData | null;
   marketStatusRef: { current: MarketStatusData | null };
+}
+
+function mapNewsResults(results: Record<string, unknown>[]): NewsItem[] {
+  return results.map((r) => ({
+    id: r.id as string,
+    title: r.title as string,
+    time: formatRelativeTime(r.published_at as string | null | undefined),
+    publishedAt: (r.published_at as string) || null,
+    isHot: r.has_sentiment as boolean,
+    source: (r.source as Record<string, unknown> | undefined)?.name as string || '',
+    favicon: (r.source as Record<string, unknown> | undefined)?.favicon_url as string || null,
+    image: r.image_url as string || null,
+    tickers: (r.tickers as string[]) || [],
+    articleUrl: (r.article_url as string) || null,
+    author: (r.author as string) ?? null,
+    description: (r.description as string) ?? null,
+    keywords: (r.keywords as string[]) || [],
+    sentiments: (r.sentiments as NewsSentimentItem[]) ?? null,
+  }));
 }
 
 /**
@@ -93,29 +130,46 @@ export function useDashboardData(): DashboardData {
     queryKey: ['dashboard', 'news'],
     queryFn: async (): Promise<NewsItem[]> => {
       const data = await getNews({ limit: 50 });
-      if (data.results && data.results.length > 0) {
-        return data.results.map((r: Record<string, unknown>) => ({
-          id: r.id as string,
-          title: r.title as string,
-          time: formatRelativeTime(r.published_at as string | null | undefined),
-          isHot: r.has_sentiment as boolean,
-          source: (r.source as Record<string, unknown> | undefined)?.name as string || '',
-          favicon: (r.source as Record<string, unknown> | undefined)?.favicon_url as string || null,
-          image: r.image_url as string || null,
-          tickers: (r.tickers as string[]) || [],
-          articleUrl: (r.article_url as string) || null,
-        }));
-      }
-      return [];
+      return data.results?.length ? mapNewsResults(data.results) : [];
     },
     staleTime: 5 * 60 * 1000, // 5 minutes fresh cache
   });
+
+  // 4. Curated "Top" Feed (TickerTick) — cursor-paginated for infinite scroll.
+  const curated = useInfiniteQuery({
+    queryKey: ['dashboard', 'curatedNews'],
+    queryFn: ({ pageParam }) => getNews({ provider: 'tickertick', limit: 50, cursor: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    staleTime: 5 * 60 * 1000, // 5 minutes fresh cache
+  });
+
+  // Flatten loaded pages, de-duping by id (guards against feed rotation between
+  // page fetches reintroducing a story).
+  const curatedItems = useMemo<NewsItem[]>(() => {
+    const rows = curated.data?.pages.flatMap((p) => p.results) ?? [];
+    const seen = new Set<string>();
+    const unique = rows.filter((r) => {
+      const id = r.id as string;
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    return mapNewsResults(unique);
+  }, [curated.data]);
 
   return {
     indices,
     indicesLoading,
     newsItems,
     newsLoading,
+    curatedItems,
+    curatedLoading: curated.isLoading,
+    curatedHasNextPage: !!curated.hasNextPage,
+    curatedIsFetchingNextPage: curated.isFetchingNextPage,
+    curatedFetchNextPage: () => {
+      void curated.fetchNextPage();
+    },
     marketStatus,
     // Kept for backward compatibility with components that might use MarketStatusRef
     marketStatusRef: { current: marketStatus }

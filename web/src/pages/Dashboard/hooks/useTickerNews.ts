@@ -1,16 +1,28 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getNews } from '../utils/api';
 
+interface NewsSentimentItem {
+  ticker: string;
+  sentiment: string;
+  reasoning?: string;
+}
+
 export interface TickerNewsItem {
   id: string;
   title: string;
   time: string;
+  publishedAt: string | null;
   isHot: boolean;
   image: string | null;
   source: string;
   favicon: string | null;
   tickers: string[];
   articleUrl?: string | null;
+  // Inlined article body — lets the detail modal render without a by-id fetch.
+  author?: string | null;
+  description?: string | null;
+  keywords?: string[];
+  sentiments?: NewsSentimentItem[] | null;
 }
 
 interface TickerRow {
@@ -45,12 +57,17 @@ function mapNewsResults(results: Record<string, unknown>[]): TickerNewsItem[] {
     id: r.id as string,
     title: r.title as string,
     time: formatRelativeTime(r.published_at as string | null | undefined),
+    publishedAt: (r.published_at as string) || null,
     isHot: r.has_sentiment as boolean,
     image: r.image_url as string || null,
     source: (r.source as Record<string, unknown> | undefined)?.name as string || '',
     favicon: (r.source as Record<string, unknown> | undefined)?.favicon_url as string || null,
     tickers: (r.tickers as string[]) || [],
     articleUrl: (r.article_url as string) || null,
+    author: (r.author as string) ?? null,
+    description: (r.description as string) ?? null,
+    keywords: (r.keywords as string[]) || [],
+    sentiments: (r.sentiments as NewsSentimentItem[]) ?? null,
   }));
 }
 
@@ -58,8 +75,9 @@ function mapNewsResults(results: Record<string, unknown>[]): TickerNewsItem[] {
  * Hook to fetch news for a list of ticker rows.
  * @param rows - Array of objects with a `symbol` property
  * @param cacheKey - Unique key for module-level caching (e.g. 'portfolio', 'watchlist')
+ * @param provider - Optional news provider to target (e.g. 'tickertick')
  */
-export function useTickerNews(rows: TickerRow[], cacheKey: string): { items: TickerNewsItem[]; loading: boolean } {
+export function useTickerNews(rows: TickerRow[], cacheKey: string, provider?: string): { items: TickerNewsItem[]; loading: boolean } {
   const cached = cacheMap.get(cacheKey);
   const [items, setItems] = useState<TickerNewsItem[]>(() => cached?.items || []);
   const [loading, setLoading] = useState(!cached);
@@ -77,7 +95,7 @@ export function useTickerNews(rows: TickerRow[], cacheKey: string): { items: Tic
 
     setLoading(true);
     try {
-      const data = await getNews({ tickers, limit: 50 });
+      const data = await getNews({ tickers, limit: 50, provider });
       const mapped: TickerNewsItem[] = data.results?.length > 0 ? mapNewsResults(data.results) : [];
       setItems(mapped);
       cacheMap.set(cacheKey, { items: mapped, tickerKey });
@@ -86,7 +104,7 @@ export function useTickerNews(rows: TickerRow[], cacheKey: string): { items: Tic
     } finally {
       setLoading(false);
     }
-  }, [rows, cacheKey]);
+  }, [rows, cacheKey, provider]);
 
   useEffect(() => {
     const tickers = (rows || []).map((r) => r.symbol).filter(Boolean);

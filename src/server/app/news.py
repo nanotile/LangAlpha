@@ -41,6 +41,10 @@ def _compact(article: dict) -> NewsArticleCompact | None:
         source=NewsPublisher(**source),
         tickers=article.get("tickers", []),
         has_sentiment=bool(sentiments and len(sentiments) > 0),
+        author=article.get("author"),
+        description=article.get("description"),
+        keywords=article.get("keywords", []),
+        sentiments=sentiments,
     )
 
 
@@ -54,6 +58,9 @@ async def get_news(
     published_before: str | None = Query(None, description="ISO 8601 date filter"),
     order: str | None = Query(None, description="Sort order: asc or desc"),
     sort: str | None = Query(None, description="Sort field, e.g. published_utc"),
+    provider: str | None = Query(
+        None, description="Target a specific news provider (e.g. 'tickertick')"
+    ),
 ) -> NewsCompactResponse:
     ticker_list = (
         [t.strip().upper() for t in tickers.split(",") if t.strip()]
@@ -63,7 +70,7 @@ async def get_news(
 
     # Check cache (skip when cursor is used — paginated requests bypass cache)
     if not cursor:
-        cached = await _cache.get(tickers=ticker_list, limit=limit)
+        cached = await _cache.get(tickers=ticker_list, limit=limit, provider=provider)
         if cached:
             results = [c for a in cached["results"] if (c := _compact(a)) is not None]
             return NewsCompactResponse(
@@ -72,10 +79,16 @@ async def get_news(
                 next_cursor=cached.get("next_cursor"),
             )
 
-    from src.data_client import get_news_data_provider
+    if provider:
+        from src.data_client import get_news_source
 
-    provider = await get_news_data_provider()
-    data = await provider.get_news(
+        source = await get_news_source(provider)
+    else:
+        from src.data_client import get_news_data_provider
+
+        source = await get_news_data_provider()
+
+    data = await source.get_news(
         tickers=ticker_list,
         limit=limit,
         cursor=cursor,
@@ -88,7 +101,7 @@ async def get_news(
 
     # Populate cache (stores full articles internally)
     if not cursor:
-        await _cache.set(data, tickers=ticker_list, limit=limit)
+        await _cache.set(data, tickers=ticker_list, limit=limit, provider=provider)
 
     results = [c for a in data["results"] if (c := _compact(a)) is not None]
     return NewsCompactResponse(
@@ -112,5 +125,16 @@ async def get_news_article(article_id: str, user_id: CurrentUserId):
     article = await provider.get_news_article(article_id, user_id=user_id)
     if article:
         return NewsArticle(**article)
+
+    # TickerTick is targeted directly (not in the chain) — try it for its rows.
+    try:
+        from src.data_client import get_news_source
+
+        tickertick = await get_news_source("tickertick")
+        article = await tickertick.get_news_article(article_id, user_id=user_id)
+        if article:
+            return NewsArticle(**article)
+    except Exception:
+        logger.debug("news.tickertick.article_lookup_failed", exc_info=True)
 
     raise HTTPException(status_code=404, detail="Article not found")

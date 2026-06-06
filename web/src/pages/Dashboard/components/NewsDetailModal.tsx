@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X, Calendar, Hash, ExternalLink, TrendingUp, TrendingDown, Minus, Tag,
   Paperclip,
@@ -38,10 +38,46 @@ interface Article {
   [key: string]: unknown;
 }
 
+/** The clicked row's full body. The list inlines description/keywords/sentiments,
+ *  so a seed with a description renders the complete modal with no by-id fetch.
+ *  Rows without one still fall back to the fetch (optional enrichment). */
+interface NewsFallback {
+  title?: string;
+  source?: string;
+  publishedAt?: string | null;
+  tickers?: string[];
+  articleUrl?: string | null;
+  author?: string | null;
+  description?: string | null;
+  keywords?: string[];
+  sentiments?: ArticleSentiment[] | null;
+  imageUrl?: string | null;
+  favicon?: string | null;
+}
+
 interface NewsDetailModalProps {
   newsId: string | null;
   onClose: () => void;
+  /** Legacy (Classic dashboard): URL-only fallback for the empty state. */
   fallbackUrl?: string | null;
+  /** Rich fallback from the clicked row — preferred. */
+  fallback?: NewsFallback | null;
+}
+
+function fallbackToArticle(fb: NewsFallback | null | undefined): Article | null {
+  if (!fb?.title) return null;
+  return {
+    title: fb.title,
+    description: fb.description ?? undefined,
+    image_url: fb.imageUrl ?? undefined,
+    article_url: fb.articleUrl ?? undefined,
+    author: fb.author ?? undefined,
+    published_at: fb.publishedAt ?? undefined,
+    source: fb.source ? { name: fb.source, favicon_url: fb.favicon ?? undefined } : undefined,
+    keywords: fb.keywords ?? [],
+    tickers: fb.tickers ?? [],
+    sentiments: fb.sentiments ?? undefined,
+  };
 }
 
 function attachArticleToContext(article: Article, articleId: string): void {
@@ -125,7 +161,7 @@ function NewsBody({
   onAttach?: () => void;
 }) {
   const { t: trans } = useTranslation();
-  if (loading) {
+  if (loading && !article) {
     return (
       <div className="flex items-center justify-center py-24">
         <div
@@ -211,6 +247,39 @@ function NewsBody({
 
       {/* Body */}
       <div className={isMobile ? 'pt-4' : 'p-6 md:p-8'}>
+        {/* Title fallback — sources without a hero image (e.g. TickerTick) still
+            need the headline + source rendered, since the hero block above is
+            skipped when there's no image_url. */}
+        {!article.image_url && (
+          <div className="mb-5 sm:mb-6">
+            {article.source?.name && (
+              <span
+                className="inline-flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider mb-2 sm:mb-3"
+                style={{
+                  backgroundColor: 'var(--color-accent-soft)',
+                  color: 'var(--color-accent-primary)',
+                }}
+              >
+                {article.source.favicon_url && (
+                  <img
+                    src={article.source.favicon_url}
+                    alt=""
+                    className="w-3.5 h-3.5 rounded-sm"
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
+                )}
+                {article.source.name}
+              </span>
+            )}
+            <h1
+              className={`${isMobile ? 'text-lg' : 'text-2xl md:text-3xl'} font-bold leading-tight`}
+              style={{ color: 'var(--color-text-primary)' }}
+            >
+              {article.title}
+            </h1>
+          </div>
+        )}
+
         {/* Meta */}
         <div
           className={`flex items-center ${isMobile ? 'gap-3 text-xs' : 'gap-6 text-sm'} mb-6 sm:mb-8 pb-3 sm:pb-4 border-b flex-wrap`}
@@ -452,7 +521,7 @@ function NewsBody({
   );
 }
 
-function NewsDetailModal({ newsId, onClose, fallbackUrl }: NewsDetailModalProps) {
+function NewsDetailModal({ newsId, onClose, fallbackUrl, fallback }: NewsDetailModalProps) {
   const { t } = useTranslation();
   const { toast } = useToast();
   const [article, setArticle] = useState<Article | null>(null);
@@ -460,6 +529,11 @@ function NewsDetailModal({ newsId, onClose, fallbackUrl }: NewsDetailModalProps)
   const [fetchFailed, setFetchFailed] = useState(false);
   const [expandedSentiment, setExpandedSentiment] = useState<number | null>(null);
   const isMobile = useIsMobile();
+
+  // Read the latest fallback at fetch time without re-running the effect when
+  // the parent hands us a fresh object for the same newsId.
+  const fallbackRef = useRef(fallback);
+  fallbackRef.current = fallback;
 
   const handleAttach = () => {
     if (!article || !newsId) return;
@@ -478,17 +552,33 @@ function NewsDetailModal({ newsId, onClose, fallbackUrl }: NewsDetailModalProps)
       setExpandedSentiment(null);
       return;
     }
+    // Seed with the clicked row's known fields so the modal renders instantly.
+    const seed = fallbackToArticle(fallbackRef.current);
     let cancelled = false;
-    setLoading(true);
+    setArticle(seed);
     setFetchFailed(false);
     setExpandedSentiment(null);
+
+    // The list now inlines the full article body, so when the row already
+    // carries a description we render straight from it — no by-id round-trip.
+    if (seed?.description) {
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Optional enrichment: rows without an inlined body (or the Classic
+    // dashboard's URL-only path) still fetch the full article by id.
+    setLoading(true);
     getNewsArticle(newsId)
       .then((data) => {
         if (!cancelled) setArticle(data as Article);
       })
       .catch((err) => {
         console.error('[NewsDetailModal] fetch failed:', err?.message);
-        if (!cancelled) {
+        if (!cancelled && !seed) {
+          // No fallback to show → surface the empty state.
           setArticle(null);
           setFetchFailed(true);
         }

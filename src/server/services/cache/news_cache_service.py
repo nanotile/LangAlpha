@@ -15,11 +15,14 @@ _GENERAL_TTL = 300  # 5 min for general news
 _TICKER_TTL = 180  # 3 min for ticker-specific news
 
 
-def _cache_key(tickers: list[str] | None, limit: int) -> str:
+def _cache_key(tickers: list[str] | None, limit: int, provider: str | None = None) -> str:
+    # Keep the ``news:`` root so get_article_by_id's ``news:*`` scan still
+    # covers provider-scoped lists.
+    prefix = f"news:{provider}" if provider else "news"
     if tickers:
         tag = ",".join(sorted(t.upper() for t in tickers))
-        return f"news:tickers:{tag}:{limit}"
-    return f"news:general:{limit}"
+        return f"{prefix}:tickers:{tag}:{limit}"
+    return f"{prefix}:general:{limit}"
 
 
 class NewsCacheService:
@@ -34,10 +37,11 @@ class NewsCacheService:
         self,
         tickers: list[str] | None = None,
         limit: int = 20,
+        provider: str | None = None,
     ) -> dict[str, Any] | None:
         try:
             cache = get_cache_client()
-            key = _cache_key(tickers, limit)
+            key = _cache_key(tickers, limit, provider)
             raw = await cache.get(key)
             if raw is not None:
                 return json.loads(raw)
@@ -66,10 +70,11 @@ class NewsCacheService:
         data: dict[str, Any],
         tickers: list[str] | None = None,
         limit: int = 20,
+        provider: str | None = None,
     ) -> None:
         try:
             cache = get_cache_client()
-            key = _cache_key(tickers, limit)
+            key = _cache_key(tickers, limit, provider)
             ttl = _TICKER_TTL if tickers else _GENERAL_TTL
             await cache.set(key, json.dumps(data), ttl=ttl)
         except Exception:
