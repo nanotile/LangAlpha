@@ -21,9 +21,11 @@ cancelled mid-teardown and orphans Chromium helper processes.
 
 import asyncio
 import logging
+import re
 from typing import Literal, Optional
 
-import html2text
+import html_to_markdown
+import trafilatura
 
 from .backend import CrawlOutput
 
@@ -101,14 +103,148 @@ def _needs_stealth(
     return None
 
 
+# Tuning for the trafilatura-vs-full-page decision, calibrated on a live 10-page
+# sample (financial news, IR releases, explainers, government statements). Well
+# extracted pages retain 88-100% of figures and stay above ~10% of the full-page
+# size; pages where trafilatura silently drops the article body retain <=28% of
+# figures (CNBC card/liveblog layouts) or collapse to <2% of the page (index/
+# listing stubs). Thresholds sit inside those gaps, biased toward preserving
+# content — for a research agent a noisier full page beats silent data loss.
+_STUB_SIZE_RATIO = 0.10       # extraction below this fraction of the full page...
+_STUB_MIN_FULL_LEN = 5000     # ...on a non-trivial page => listing/index stub
+_FIGURE_MIN_SAMPLE = 8        # only trust the figure ratio above this many figures
+_FIGURE_KEEP_RATIO = 0.65     # retaining fewer than this fraction => body dropped
+
+# Context-safety ceiling on the full-page fallback. The fallback returns the
+# entire noisy page, which on liveblog/hub layouts runs to hundreds of KB; cap
+# it to ~100K tokens (~4 chars/token) so a single crawl can't swamp the agent's
+# context. The clean trafilatura extraction is small and never hits this.
+_MAX_FULL_PAGE_CHARS = 400_000
+
+_PCT_RE = re.compile(r"\d+(?:\.\d+)?\s?%")
+_DOLLAR_RE = re.compile(
+    r"\$\s?\d[\d,]*(?:\.\d+)?\s?(?:billion|million|trillion|bn|b|m)?", re.IGNORECASE
+)
+_BIGNUM_RE = re.compile(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b")
+
+
+def _financial_figures(text: str) -> set[str]:
+    """Normalized set of $/% /comma-grouped numbers — the detail an analyst needs."""
+    figs: set[str] = set()
+    for rx in (_PCT_RE, _DOLLAR_RE, _BIGNUM_RE):
+        for match in rx.findall(text):
+            figs.add(re.sub(r"\s+", "", match.lower()))
+    return figs
+
+
+def _try_trafilatura(html: str) -> Optional[str]:
+    try:
+        return trafilatura.extract(
+            html,
+            favor_recall=True,
+            output_format="markdown",
+            include_links=True,
+            include_images=True,
+            include_formatting=True,
+            include_tables=True,
+        )
+    except Exception as e:
+        logger.debug(f"trafilatura extraction failed: {e}")
+        return None
+
+
+def _try_full_page(html: str) -> Optional[str]:
+    try:
+        return html_to_markdown.convert(html).content
+    except Exception as e:
+        logger.debug(f"html-to-markdown conversion failed: {e}")
+        return None
+
+
+def _cap_full_page(text: str) -> str:
+    """Truncate an oversized full-page fallback to the context-safety ceiling."""
+    if len(text) <= _MAX_FULL_PAGE_CHARS:
+        return text
+    logger.debug(
+        f"full-page fallback {len(text)} chars exceeds cap — truncating to "
+        f"{_MAX_FULL_PAGE_CHARS}"
+    )
+    return text[:_MAX_FULL_PAGE_CHARS] + "\n\n[... truncated: page exceeded ~100K tokens ...]"
+
+
 def _html_to_markdown(html: str) -> str:
-    """Convert HTML to clean markdown using html2text."""
-    converter = html2text.HTML2Text()
-    converter.ignore_links = False
-    converter.ignore_images = False
-    converter.body_width = 0  # No wrapping
-    converter.ignore_emphasis = False
-    return converter.handle(html)
+    """Convert fetched HTML to markdown for the LLM.
+
+    trafilatura extracts the main article and strips nav/ads/boilerplate (cleaner,
+    3-7x cheaper input), but silently under-extracts on two page shapes. We compare
+    it against a faithful full-page conversion (html-to-markdown's Rust core — the
+    cheaper of the two and immune to recursion limits) and prefer the full page when
+    trafilatura returns an index/listing stub or drops most of the page's financial
+    figures. A stdlib text extractor is the last resort.
+    """
+    extracted = _try_trafilatura(html)
+    full = _try_full_page(html)
+
+    # trafilatura found no main content (e.g. legacy table-only filings).
+    if not (extracted and extracted.strip()):
+        return _cap_full_page(full) if (full and full.strip()) else _plain_text(html)
+
+    # No full-page baseline to compare against — trust trafilatura.
+    if not (full and full.strip()):
+        return extracted
+
+    # Index/listing stub: trafilatura kept an intro blurb and dropped the link
+    # list (SEC/Fed newsrooms). The full page preserves the headlines.
+    if len(extracted) < _STUB_SIZE_RATIO * len(full) and len(full) > _STUB_MIN_FULL_LEN:
+        logger.debug(
+            f"trafilatura output {len(extracted)} chars vs full {len(full)} — "
+            "treating as listing stub, using full page"
+        )
+        return _cap_full_page(full)
+
+    # Card/liveblog layout: trafilatura kept the lead card and dropped the body's
+    # figures (CNBC). Compare $/% figure sets; prefer the full page on heavy loss.
+    full_figs = _financial_figures(full)
+    if len(full_figs) >= _FIGURE_MIN_SAMPLE:
+        kept = len(_financial_figures(extracted) & full_figs) / len(full_figs)
+        if kept < _FIGURE_KEEP_RATIO:
+            logger.debug(
+                f"trafilatura retained {kept:.0%} of {len(full_figs)} figures — "
+                "treating as dropped body, using full page"
+            )
+            return _cap_full_page(full)
+
+    return extracted
+
+
+def _plain_text(html: str) -> str:
+    """Last-resort plain-text extraction using the stdlib parser (never recurses)."""
+    from html.parser import HTMLParser
+
+    class _Extractor(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parts: list[str] = []
+            self._skip = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style"):
+                self._skip += 1
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style") and self._skip:
+                self._skip -= 1
+
+        def handle_data(self, data):
+            if not self._skip and data.strip():
+                self.parts.append(data.strip())
+
+    try:
+        p = _Extractor()
+        p.feed(html)
+        return " ".join(p.parts)
+    except Exception:
+        return html
 
 
 def _extract_title(page) -> str:
@@ -178,7 +314,7 @@ class ScraplingCrawler:
                 )
             if not _needs_browser(html_body, status):
                 title = _extract_title(page)
-                markdown = _html_to_markdown(html_body)
+                markdown = await asyncio.to_thread(_html_to_markdown, html_body)
                 logger.debug(f"Tier 1 (fast) succeeded for {url}")
                 return CrawlOutput(
                     title=title, html=html_body, markdown=markdown, status=status
@@ -222,7 +358,7 @@ class ScraplingCrawler:
             stealth_reason = _needs_stealth(html_body, status)
             if stealth_reason is None:
                 title = _extract_title(page)
-                markdown = _html_to_markdown(html_body)
+                markdown = await asyncio.to_thread(_html_to_markdown, html_body)
                 logger.debug(f"Tier 2 (dynamic) succeeded for {url}")
                 return CrawlOutput(
                     title=title, html=html_body, markdown=markdown, status=status
@@ -245,7 +381,7 @@ class ScraplingCrawler:
             tier3_reason = _needs_stealth(html_body, status)
             if tier3_reason is None:
                 title = _extract_title(page)
-                markdown = _html_to_markdown(html_body)
+                markdown = await asyncio.to_thread(_html_to_markdown, html_body)
                 logger.debug(f"Tier 3 (stealth) completed for {url} (status={status})")
                 return CrawlOutput(
                     title=title, html=html_body, markdown=markdown, status=status
