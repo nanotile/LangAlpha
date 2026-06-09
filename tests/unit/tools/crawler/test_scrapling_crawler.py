@@ -16,7 +16,7 @@ from src.tools.crawler.scrapling_crawler import (
     _html_to_markdown,
     _needs_browser,
     _needs_stealth,
-    _promote_frontmatter_title,
+    _try_full_page,
 )
 
 
@@ -623,30 +623,17 @@ class TestExtractTitle:
         assert _extract_title(page) == ""
 
 
-class TestPromoteFrontmatterTitle:
-    """trafilatura strips the <h1>/title from the body; we promote it back."""
+class TestFullPageNoHeadMetaLeak:
+    """The full-page fallback must not dump <head> meta tags as frontmatter noise."""
 
-    def test_title_promoted_to_heading(self):
-        # The shape that regressed: <h1> + <p>, title only in metadata.
-        text = "---\ntitle: Herman Melville - Moby-Dick\n---\nAvailing himself of the mild weather."
-        result = _promote_frontmatter_title(text)
-        assert result == "# Herman Melville - Moby-Dick\n\nAvailing himself of the mild weather."
-
-    def test_title_already_in_body_not_duplicated(self):
-        text = "---\ntitle: Q1 Earnings Beat\n---\n# Q1 Earnings Beat\n\nRevenue grew."
-        result = _promote_frontmatter_title(text)
-        assert result.lower().count("q1 earnings beat") == 1
-
-    def test_quoted_title_stripped(self):
-        text = '---\ntitle: "Fed holds rates: what it means"\n---\nThe Fed left rates unchanged.'
-        result = _promote_frontmatter_title(text)
-        assert result.startswith("# Fed holds rates: what it means\n\n")
-
-    def test_frontmatter_without_title_dropped(self):
-        text = "---\nauthor: Jane Doe\n---\nBody text with no title field."
-        result = _promote_frontmatter_title(text)
-        assert result == "Body text with no title field."
-
-    def test_plain_body_passthrough(self):
-        # No frontmatter (e.g. mocked extract returning a bare string) is untouched.
-        assert _promote_frontmatter_title("just markdown body") == "just markdown body"
+    def test_head_meta_not_emitted(self):
+        html = (
+            '<html><head>'
+            '<meta name="description" content="seo blurb">'
+            '<meta property="og:title" content="OG Title">'
+            "</head><body><h1>Real Heading</h1><p>Real body content.</p></body></html>"
+        )
+        out = _try_full_page(html)
+        assert "Real Heading" in out and "Real body content." in out
+        assert not out.lstrip().startswith("---")
+        assert "meta-description" not in out and "og:title" not in out

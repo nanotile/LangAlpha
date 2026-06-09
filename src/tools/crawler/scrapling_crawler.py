@@ -138,9 +138,15 @@ def _financial_figures(text: str) -> set[str]:
 
 
 def _try_trafilatura(html: str) -> Optional[str]:
-    """Extract the main article as markdown, restoring the title trafilatura strips."""
+    """Extract the main article as markdown with a YAML metadata frontmatter.
+
+    `with_metadata=True` keeps trafilatura's title/source/date/author/description
+    block — without it a lone `<h1>` page extracts to body-only and loses the
+    heading. The frontmatter is already clean (junk fields come back empty and are
+    omitted); pass it through and let the agent decide which fields it cares about.
+    """
     try:
-        out = trafilatura.extract(
+        return trafilatura.extract(
             html,
             favor_recall=True,
             output_format="markdown",
@@ -153,37 +159,19 @@ def _try_trafilatura(html: str) -> Optional[str]:
     except Exception as e:
         logger.debug(f"trafilatura extraction failed: {e}")
         return None
-    return _promote_frontmatter_title(out) if out else out
-
-
-def _promote_frontmatter_title(text: str) -> str:
-    """Lift trafilatura's frontmatter title into a Markdown H1, dropping the rest.
-
-    With `with_metadata`, trafilatura pulls the article title/<h1> out of the body
-    into a YAML frontmatter block; without this a page that is just
-    `<h1>Title</h1><p>body</p>` would extract to body-only and lose the heading.
-    """
-    if not text.startswith("---"):
-        return text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return text
-    block = text[3:end]
-    body = text[end + len("\n---") :].lstrip("\n")
-    title = ""
-    for line in block.splitlines():
-        if line.strip().startswith("title:"):
-            title = line.split("title:", 1)[1].strip().strip('"').strip("'")
-            break
-    if title and title.lower() not in body[: len(title) + 16].lower():
-        return f"# {title}\n\n{body}" if body else f"# {title}"
-    return body
 
 
 def _try_full_page(html: str) -> Optional[str]:
-    """Convert the entire page to markdown via html-to-markdown's Rust core."""
+    """Convert the entire page to markdown via html-to-markdown's Rust core.
+
+    `extract_metadata=False` suppresses html-to-markdown's default <head> dump (a
+    `meta-og:*` / gtm-dataLayer frontmatter block) that is pure noise on the hub,
+    listing and error pages this full-page fallback handles.
+    """
     try:
-        return html_to_markdown.convert(html).content
+        return html_to_markdown.convert(
+            html, html_to_markdown.ConversionOptions(extract_metadata=False)
+        ).content
     except Exception as e:
         logger.debug(f"html-to-markdown conversion failed: {e}")
         return None
