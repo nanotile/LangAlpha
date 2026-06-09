@@ -12,6 +12,7 @@ import {
   type NewsArticleDetail,
 } from '../framework/snapshotSerializers';
 import { buildNewsArticleSnapshot } from '../../utils/newsArticleFetch';
+import type { NewsSentimentItem } from '../../utils/newsItem';
 import { RowAttachButton } from '../../components/RowAttachButton';
 import type { WidgetRenderProps } from '../types';
 
@@ -36,12 +37,6 @@ const DATE_RANGES: { key: DateRangeKey; labelKey: string }[] = [
   { key: '24h', labelKey: 'dashboard.widgets.newsFeed.range_24h' },
   { key: '7d', labelKey: 'dashboard.widgets.newsFeed.range_7d' },
 ];
-
-interface NewsSentimentItem {
-  ticker: string;
-  sentiment: string;
-  reasoning?: string;
-}
 
 interface NewsItem {
   id?: string | number;
