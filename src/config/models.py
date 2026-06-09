@@ -180,7 +180,8 @@ class NewsPollFeedConfig(BaseModel):
 
     ``provider`` None targets the provider chain (Market general feed); a name
     (e.g. ``tickertick``) targets that source directly. Always polled with no
-    tickers, so it maps to a global ``news:[provider]:general:<limit>`` key.
+    tickers, so it maps to a global cache key — ``news:tickertick:general:50``
+    with a provider, ``news:general:50`` without one.
     """
 
     provider: str | None = Field(default=None)

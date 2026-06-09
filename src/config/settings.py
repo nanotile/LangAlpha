@@ -11,6 +11,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from src.config.core import get_infrastructure_config
+from src.config.models import NewsPollConfig
 
 # Re-export env-var constants for backward compatibility
 from src.config.env import (  # noqa: F401
@@ -171,7 +172,7 @@ def is_redis_cache_enabled() -> bool:
     return get_infrastructure_config().redis.cache_enabled
 
 
-def get_news_poll_config():
+def get_news_poll_config() -> NewsPollConfig:
     """News refresh poller config (enabled / interval / max_items / feeds)."""
     return get_infrastructure_config().news_poll
 
