@@ -671,7 +671,8 @@
       },
       "newsFeed": {
         "title": "News Feed",
-        "description": "Market / Portfolio / Watchlist news with ticker + time filters.",
+        "description": "Top / Market / Portfolio / Watchlist news with ticker, source + time filters.",
+        "tab_top": "Top",
         "tab_market": "Market",
         "tab_portfolio": "Portfolio",
         "tab_watchlist": "Watchlist",
@@ -684,8 +685,11 @@
         "tickerPlaceholder": "Ticker…",
         "clearTicker": "Clear ticker filter",
         "clear": "Clear",
+        "sourceLabel": "Filter by source",
+        "allSources": "All sources",
         "emptyFiltered": "No news matching filters",
         "emptyMarket": "No market news",
+        "emptyTop": "No top news",
         "emptyAddTo": "Add to {{label}} to see news"
       },
       "earningsCalendar": {

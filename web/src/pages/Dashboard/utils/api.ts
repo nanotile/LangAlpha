@@ -72,6 +72,7 @@ interface NewsParams {
   tickers?: string[];
   limit?: number;
   cursor?: string;
+  provider?: string;
 }
 
 interface NewsResponse {
@@ -536,22 +537,25 @@ export async function disconnectClaudeOAuth(): Promise<Record<string, unknown>> 
 
 /**
  * Fetch news articles from the native news endpoint.
- * GET /api/v1/news?tickers=...&limit=...&cursor=...
- * @param {{ tickers?: string[], limit?: number, cursor?: string }} opts
+ * GET /api/v1/news?tickers=...&limit=...&cursor=...&provider=...
+ * @param {{ tickers?: string[], limit?: number, cursor?: string, provider?: string }} opts
  * @returns {Promise<{ results: Array, count: number, next_cursor: string|null }>}
  */
-export async function getNews({ tickers, limit = 20, cursor }: NewsParams = {}): Promise<NewsResponse> {
+export async function getNews({ tickers, limit = 20, cursor, provider }: NewsParams = {}): Promise<NewsResponse> {
   try {
     const params: Record<string, string | number> = {};
     if (tickers && tickers.length) params.tickers = tickers.join(',');
     if (limit) params.limit = limit;
     if (cursor) params.cursor = cursor;
+    if (provider) params.provider = provider;
     const { data } = await api.get('/api/v1/news', { params });
     return data || { results: [], count: 0, next_cursor: null };
   } catch (e: unknown) {
     const err = e as { message?: string };
     console.error('[API] getNews failed:', err?.message);
-    return { results: [], count: 0, next_cursor: null };
+    // Re-throw so the React Query callers retry (retry:1) and KEEP the last
+    // good list instead of overwriting a live feed with [] on a transient blip.
+    throw e;
   }
 }
 

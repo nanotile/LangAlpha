@@ -259,7 +259,7 @@ function CustomInner({ mode, onModeChange }: DashboardCustomProps) {
       <NewsDetailModal
         newsId={modals.selectedNewsId}
         onClose={modals.closeNews}
-        fallbackUrl={modals.selectedNewsFallbackUrl}
+        fallback={modals.selectedNewsFallback}
       />
       <InsightDetailModal
         marketInsightId={modals.selectedMarketInsightId}
