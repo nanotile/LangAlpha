@@ -139,6 +139,19 @@ function formatDate(dateString: string | undefined): string {
   }
 }
 
+/** Only allow http(s) URLs into an <a href>. Article/fallback URLs come from
+ *  external news feeds, and React does NOT block javascript:/data: schemes,
+ *  which would execute on click. Returns undefined for anything non-http(s). */
+function safeHttpUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const protocol = new URL(url, window.location.origin).protocol;
+    return protocol === 'http:' || protocol === 'https:' ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Shared inner content for both mobile bottom sheet and desktop dialog */
 function NewsBody({
   article,
@@ -161,6 +174,8 @@ function NewsBody({
   onAttach?: () => void;
 }) {
   const { t: trans } = useTranslation();
+  const safeFallbackUrl = safeHttpUrl(fallbackUrl);
+  const safeArticleUrl = safeHttpUrl(article?.article_url);
   if (loading && !article) {
     return (
       <div className="flex items-center justify-center py-24">
@@ -178,9 +193,9 @@ function NewsBody({
         <p style={{ color: 'var(--color-text-secondary)' }}>
           {fetchFailed ? 'Article details not available' : 'Article not found'}
         </p>
-        {fetchFailed && fallbackUrl && (
+        {fetchFailed && safeFallbackUrl && (
           <a
-            href={fallbackUrl}
+            href={safeFallbackUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors"
@@ -323,9 +338,9 @@ function NewsBody({
                 {trans('dashboard.widgets.frame.addToContext', { defaultValue: 'Attach to chat' })}
               </button>
             )}
-            {article.article_url && (
+            {safeArticleUrl && (
               <a
-                href={article.article_url}
+                href={safeArticleUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1.5 transition-opacity hover:opacity-80"
@@ -563,9 +578,7 @@ function NewsDetailModal({ newsId, onClose, fallbackUrl, fallback }: NewsDetailM
     // carries a description we render straight from it — no by-id round-trip.
     if (seed?.description) {
       setLoading(false);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
 
     // Optional enrichment: rows without an inlined body (or the Classic
