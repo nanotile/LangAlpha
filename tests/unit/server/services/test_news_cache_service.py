@@ -8,8 +8,6 @@ SCAN-based ``scan_keys`` helper.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from src.server.services.cache.news_cache_service import NewsCacheService
@@ -20,11 +18,11 @@ _GET_CACHE = "src.server.services.cache.news_cache_service.get_cache_client"
 class _StubCache:
     """Minimal stand-in: scan_keys + get over an in-memory keyspace.
 
-    Values are JSON strings, matching what RedisCacheClient.get returns for
-    NewsCacheService entries (which are stored json.dumps-encoded).
+    Values are decoded dicts, matching what RedisCacheClient.get returns — it
+    JSON-decodes before handing the value back to NewsCacheService.
     """
 
-    def __init__(self, store: dict[str, str]):
+    def __init__(self, store: dict[str, dict]):
         self._store = store
 
     async def scan_keys(self, pattern: str) -> list[str]:
@@ -38,8 +36,8 @@ class _StubCache:
 async def test_get_article_by_id_finds_match(monkeypatch):
     article = {"id": "abc", "title": "Top story", "article_url": "https://x/a"}
     store = {
-        "news:general:20": json.dumps({"results": [{"id": "zzz"}]}),
-        "news:tickertick:general:50": json.dumps({"results": [article]}),
+        "news:general:20": {"results": [{"id": "zzz"}]},
+        "news:tickertick:general:50": {"results": [article]},
     }
     monkeypatch.setattr(_GET_CACHE, lambda: _StubCache(store))
 
@@ -49,7 +47,7 @@ async def test_get_article_by_id_finds_match(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_article_by_id_miss_returns_none(monkeypatch):
-    store = {"news:general:20": json.dumps({"results": [{"id": "zzz"}]})}
+    store = {"news:general:20": {"results": [{"id": "zzz"}]}}
     monkeypatch.setattr(_GET_CACHE, lambda: _StubCache(store))
 
     assert await NewsCacheService().get_article_by_id("abc") is None

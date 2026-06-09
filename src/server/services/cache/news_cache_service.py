@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -47,9 +46,8 @@ class NewsCacheService:
         try:
             cache = get_cache_client()
             key = _cache_key(tickers, limit, provider)
-            raw = await cache.get(key)
-            if raw is not None:
-                return json.loads(raw)
+            # RedisCacheClient.get already JSON-decodes — the value is a dict.
+            return await cache.get(key)
         except Exception:
             logger.debug("news_cache.get.miss", exc_info=True)
         return None
@@ -66,9 +64,8 @@ class NewsCacheService:
             cache = get_cache_client()
             keys = await cache.scan_keys("news:*")
             for key in keys:
-                raw = await cache.get(key)
-                if raw:
-                    data = json.loads(raw)
+                data = await cache.get(key)
+                if data:
                     for article in data.get("results", []):
                         if article.get("id") == article_id:
                             return article
@@ -95,6 +92,6 @@ class NewsCacheService:
             cache = get_cache_client()
             key = _cache_key(tickers, limit, provider)
             ttl = _TICKER_TTL if tickers else _GENERAL_TTL
-            await cache.set(key, json.dumps(data), ttl=ttl)
+            await cache.set(key, data, ttl=ttl)
         except Exception:
             logger.debug("news_cache.set.failed", exc_info=True)
