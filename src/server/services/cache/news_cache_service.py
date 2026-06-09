@@ -74,12 +74,24 @@ class NewsCacheService:
         return None
 
     async def acquire_lock(self, key: str, token: str, ttl_ms: int) -> bool | None:
-        """Distributed refresh lock (see RedisCacheClient.acquire_lock)."""
-        return await get_cache_client().acquire_lock(key, token, ttl_ms)
+        """Distributed refresh lock (see RedisCacheClient.acquire_lock).
+
+        Guards the client lookup like every other method here: a failure returns
+        None ("uncoordinated — fetch directly") rather than propagating through
+        the shared single-flight task and 500-ing every waiter.
+        """
+        try:
+            return await get_cache_client().acquire_lock(key, token, ttl_ms)
+        except Exception:
+            logger.debug("news_cache.acquire_lock.failed", exc_info=True)
+            return None
 
     async def release_lock(self, key: str, token: str) -> None:
-        """Release a refresh lock held under ``key`` with ``token``."""
-        await get_cache_client().release_lock(key, token)
+        """Release a refresh lock held under ``key`` with ``token`` (best-effort)."""
+        try:
+            await get_cache_client().release_lock(key, token)
+        except Exception:
+            logger.debug("news_cache.release_lock.failed", exc_info=True)
 
     async def set(
         self,

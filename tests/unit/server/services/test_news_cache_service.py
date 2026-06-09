@@ -57,3 +57,18 @@ async def test_get_article_by_id_miss_returns_none(monkeypatch):
 async def test_get_article_by_id_empty_keyspace(monkeypatch):
     monkeypatch.setattr(_GET_CACHE, lambda: _StubCache({}))
     assert await NewsCacheService().get_article_by_id("abc") is None
+
+
+@pytest.mark.asyncio
+async def test_lock_helpers_degrade_when_client_unavailable(monkeypatch):
+    # get_cache_client() blowing up (e.g. pool not ready on a cold start) must
+    # not propagate: acquire_lock returns None so the single-flight leader falls
+    # back to a direct fetch instead of 500-ing every concurrent waiter, and
+    # release_lock stays a no-op.
+    def _boom():
+        raise RuntimeError("cache client unavailable")
+
+    monkeypatch.setattr(_GET_CACHE, _boom)
+    svc = NewsCacheService()
+    assert await svc.acquire_lock("newslock:k", "tok", 30_000) is None
+    await svc.release_lock("newslock:k", "tok")  # must not raise
