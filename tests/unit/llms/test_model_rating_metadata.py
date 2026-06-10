@@ -54,7 +54,8 @@ class TestRatingMetadataSurfacing:
                 if field in entry:
                     assert entry[field] in range(1, 6), f"{key}: {field} must be 1-5"
             if "context" in entry:
-                assert isinstance(entry["context"], int) and entry["context"] > 0
+                assert isinstance(entry["context"], int), f"{key}: context must be an int"
+                assert entry["context"] > 0, f"{key}: context must be positive"
 
 
 class TestPriceTier:
