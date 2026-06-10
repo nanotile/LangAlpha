@@ -107,9 +107,9 @@ def band(value: float, bands: list[tuple[float, int]]) -> int:
 
 
 def get_key(env_file: Path) -> str:
-    key = os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY")
+    key = (os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY") or "").strip()
     if key:
-        return key.strip()
+        return key
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             if line.startswith("ARTIFICIAL_ANALYSIS_API_KEY="):
@@ -241,6 +241,11 @@ def main() -> None:
     manifest = json.loads(MANIFEST.read_text())
     visible = [k for k, v in manifest.items() if v.get("visible")]
 
+    # MANUAL overrides: applied (on --apply) to every visible variant of each
+    # base, for the listed fields only — computed up front so dry-run rows can
+    # show the value --apply would actually write.
+    overrides = {k: MANUAL[collapse_base(k)] for k in visible if collapse_base(k) in MANUAL}
+
     matched, unmatched, changes = [], [], 0
     print(f"basis={args.basis}  fields={','.join(sorted(write_fields))}\n")
     print(f"{'model':30s} {'cur s/i':>7}  {'AA II':>6} {'AA tps':>7}  {'new s/i':>7}  AA row (effort matched)")
@@ -251,8 +256,14 @@ def main() -> None:
         rows = by_tokens.get(tokens(k)) or by_tokens.get(tokens(base_name(k)))
         row = pick_row(rows, target_effort_rank(cur), args.basis) if rows else {}
         if not row:
+            ov = overrides.get(k, {})
+            new_s = ov["speed"] if ("speed" in ov and "speed" in write_fields) else cur_s
+            new_i = ov["intelligence"] if ("intelligence" in ov and "intelligence" in write_fields) else cur_i
+            label = "(manual)" if (new_s, new_i) != (cur_s, cur_i) else "(keep)"
+            if label == "(manual)":
+                changes += 1
             unmatched.append(k)
-            print(f"{k:30s} {f'{cur_s}/{cur_i}':>7}  {'—':>6} {'—':>7}  {'(keep)':>7}  — no AA match")
+            print(f"{k:30s} {f'{cur_s}/{cur_i}':>7}  {'—':>6} {'—':>7}  {f'{new_s}/{new_i}' if label == '(manual)' else label:>8}  — no AA match")
             continue
         ii, tps, name = ii_of(row), _num(row.get("performance", {}).get("median_output_tokens_per_second")), row["name"]
         new_i = band(ii, INTEL_BANDS) if ("intelligence" in write_fields and ii is not None) else cur_i
@@ -270,9 +281,6 @@ def main() -> None:
     if unmatched:
         print("UNMATCHED (AA has no row; see MANUAL below for any covered): " + ", ".join(unmatched))
 
-    # MANUAL overrides: applied to every visible variant of each base, for the
-    # listed fields only (so AA-derived fields on matched models survive).
-    overrides = {k: MANUAL[collapse_base(k)] for k in visible if collapse_base(k) in MANUAL}
     if overrides:
         print("\nMANUAL OVERRIDES (sourced; AA-untracked or no-throughput):")
         for b, ov in MANUAL.items():
