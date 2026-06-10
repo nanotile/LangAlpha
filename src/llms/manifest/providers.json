@@ -969,7 +969,7 @@
           "input": 2.677,
           "cached_input": 0.535,
           "cache_5m": 3.346,
-          "output": 8.030,
+          "output": 8.03,
           "unit": "per_1m_tokens"
         }
       },
