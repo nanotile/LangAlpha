@@ -8,11 +8,14 @@ import ast
 
 from ptc_agent.core.mcp_sanitize import (
     VAULT_REF_RE,
+    discovery_should_use_secrets,
     sanitize_tool_name,
     sanitize_tool_set,
     sanitize_tool_text,
     vault_refs,
 )
+
+from src.ptc_agent.config.core import MCPServerConfig
 
 
 class _Tool:
@@ -20,6 +23,46 @@ class _Tool:
 
     def __init__(self, name: str) -> None:
         self.name = name
+
+
+class TestDiscoveryShouldUseSecrets:
+    """Effective discovery-secret gating (auth'd remote servers self-enable)."""
+
+    def test_explicit_flag_wins(self):
+        srv = MCPServerConfig(
+            name="s", transport="stdio", command="npx", source="workspace",
+            discovery_uses_secrets=True,
+        )
+        assert discovery_should_use_secrets(srv) is True
+
+    def test_remote_vault_header_auto_enables(self):
+        srv = MCPServerConfig(
+            name="s", transport="http", url="https://api.example.com/m",
+            headers={"Authorization": "${vault:K}"}, source="workspace",
+        )
+        assert discovery_should_use_secrets(srv) is True
+
+    def test_remote_without_vault_header_stays_off(self):
+        srv = MCPServerConfig(
+            name="s", transport="http", url="https://api.example.com/m",
+            headers={"X-Trace": "literal"}, source="workspace",
+        )
+        assert discovery_should_use_secrets(srv) is False
+
+    def test_stdio_with_vault_env_does_not_auto_enable(self):
+        # Stdio runs untrusted code — the flag must stay opt-in there.
+        srv = MCPServerConfig(
+            name="s", transport="stdio", command="npx",
+            env={"TOK": "${vault:K}"}, source="workspace",
+        )
+        assert discovery_should_use_secrets(srv) is False
+
+    def test_builtin_remote_never_auto_enables(self):
+        srv = MCPServerConfig(
+            name="s", transport="http", url="https://api.example.com/m",
+            headers={"Authorization": "${vault:K}"}, source="builtin",
+        )
+        assert discovery_should_use_secrets(srv) is False
 
 
 class TestVaultRefRegex:

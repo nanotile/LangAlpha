@@ -186,7 +186,7 @@ class TestSessionCachesMcp:
         resolved = _resolved(2)
         captured = {}
 
-        def fake_build(reg, user_servers, schemas):
+        def fake_build(reg, user_servers, schemas, disabled=frozenset()):
             captured["reg"] = reg
             return MagicMock(name="new_composite")
 
@@ -220,6 +220,9 @@ class TestVersionDeltaBackgroundDiscovery:
         slow discovery+sync never runs inline on the caller's coroutine."""
         wm = WorkspaceManager.get_instance(config=_make_config())
         session = _make_session(version=2, summary="s")
+        # The session must be the live one for the workspace, else the liveness
+        # re-check short-circuits discovery (see _cancel/_session_live).
+        wm._sessions["ws"] = session
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -251,6 +254,102 @@ class TestVersionDeltaBackgroundDiscovery:
         session = _make_session()
         wm._kick_mcp_discovery("ws", "user-1", session, [], 2)
         assert len(wm._mcp_discovery_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_kick_discovery_short_circuits_when_session_not_live(self):
+        """If the session was evicted (stopped/deleted) before the task runs,
+        discovery short-circuits and never calls discover_and_cache."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        session = _make_session(version=2, summary="s")
+        # Session is NOT registered as the live session for "ws".
+        server = MagicMock()
+        server.name = "alpha"
+        mock_discover = AsyncMock(return_value=[])
+        with patch(
+            "src.server.services.mcp_discovery.discover_and_cache",
+            new=mock_discover,
+        ):
+            wm._kick_mcp_discovery("ws", "user-1", session, [server], 2)
+            task = next(iter(wm._mcp_discovery_tasks))
+            await task
+        mock_discover.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_mcp_discovery_cancels_in_flight_task(self):
+        """_cancel_mcp_discovery cancels a workspace's in-flight discovery task
+        and prunes the per-workspace map (used by stop/delete)."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        session = _make_session(version=2, summary="s")
+        wm._sessions["ws"] = session
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_discover(*a, **k):
+            started.set()
+            await release.wait()
+            return []
+
+        server = MagicMock()
+        server.name = "alpha"
+        with patch(
+            "src.server.services.mcp_discovery.discover_and_cache",
+            new=AsyncMock(side_effect=slow_discover),
+        ):
+            wm._kick_mcp_discovery("ws", "user-1", session, [server], 2)
+            await started.wait()
+            task = next(iter(wm._mcp_discovery_tasks_by_ws["ws"]))
+
+            wm._cancel_mcp_discovery("ws")
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert task.cancelled()
+            # Per-workspace map pruned; global set drained via done callback.
+            assert "ws" not in wm._mcp_discovery_tasks_by_ws
+            assert task not in wm._mcp_discovery_tasks
+
+    @pytest.mark.asyncio
+    @patch("src.server.services.workspace_manager.db_get_workspace", new_callable=AsyncMock)
+    @patch("src.server.services.workspace_manager.update_workspace_status", new_callable=AsyncMock)
+    async def test_stop_workspace_cancels_discovery(self, mock_status, mock_get_ws):
+        """stop_workspace cancels the workspace's in-flight discovery task."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        ws_id = str(uuid.uuid4())
+        mock_get_ws.return_value = _make_workspace(ws_id, status="running")
+        mock_status.return_value = _make_workspace(ws_id, status="stopped")
+
+        cancelled = {"value": False}
+
+        async def never_returns(*a, **k):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                raise
+            return []
+
+        session = _make_session(version=1, summary="s")
+        session.stop = AsyncMock()
+        wm._sessions[ws_id] = session
+        wm._backup_files_to_db = AsyncMock()
+
+        with patch(
+            "src.server.services.mcp_discovery.discover_and_cache",
+            new=AsyncMock(side_effect=never_returns),
+        ):
+            server = MagicMock()
+            server.name = "alpha"
+            wm._kick_mcp_discovery(ws_id, "user-1", session, [server], 1)
+            task = next(iter(wm._mcp_discovery_tasks_by_ws[ws_id]))
+            # Give the task a tick to enter discover_and_cache.
+            await asyncio.sleep(0)
+
+            await wm.stop_workspace(ws_id)
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert ws_id not in wm._mcp_discovery_tasks_by_ws
 
     @pytest.mark.asyncio
     async def test_servers_needing_discovery_excludes_servers_with_tools(self):
@@ -324,3 +423,60 @@ class TestVersionDeltaBackgroundDiscovery:
         assert lock_held_during_resolve["value"] is False
         # Wrappers re-synced after the config change.
         wm._sync_sandbox_assets.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Applied-version getter + proactive apply (front-load config to a live session)
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedVersionAndProactiveApply:
+    def setup_method(self):
+        WorkspaceManager.reset_instance()
+
+    def teardown_method(self):
+        WorkspaceManager.reset_instance()
+
+    def test_applied_version_none_without_session(self):
+        """No warm session ⇒ the config isn't loaded anywhere live ⇒ None."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        assert wm.get_applied_mcp_config_version("ws-x") is None
+
+    def test_applied_version_reads_warm_session(self):
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        wm._sessions["ws"] = _make_session(version=7, summary="s")
+        assert wm.get_applied_mcp_config_version("ws") == 7
+
+    @pytest.mark.asyncio
+    async def test_proactive_apply_warms_without_ready_session(self):
+        """No live session ⇒ still acquire, which warms (cold-starts) the
+        sandbox. A user who just configured a server expects it to come up and
+        verify regardless of whether the sandbox happened to be running."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        wm.get_session_for_workspace = AsyncMock()
+        await wm.proactively_apply_mcp_config("ws-x", "user-1")
+        wm.get_session_for_workspace.assert_awaited_once_with("ws-x", user_id="user-1")
+
+    @pytest.mark.asyncio
+    async def test_proactive_apply_clears_cooldown_and_reacquires(self):
+        """A warm session ⇒ clear the 30s sync cooldown (so the re-acquire
+        actually re-syncs rather than short-circuiting) and re-acquire."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        wm._sessions["ws"] = _make_session(version=2, summary="s")
+        wm._record_sync("ws")
+        assert "ws" in wm._last_sync_at
+        wm.get_session_for_workspace = AsyncMock()
+
+        await wm.proactively_apply_mcp_config("ws", "user-1")
+
+        assert "ws" not in wm._last_sync_at
+        wm.get_session_for_workspace.assert_awaited_once_with("ws", user_id="user-1")
+
+    @pytest.mark.asyncio
+    async def test_proactive_apply_swallows_errors(self):
+        """Best-effort: a failure never propagates — it just falls back to the
+        next-message apply, so a mutation response is never affected."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        wm._sessions["ws"] = _make_session(version=2, summary="s")
+        wm.get_session_for_workspace = AsyncMock(side_effect=RuntimeError("boom"))
+        await wm.proactively_apply_mcp_config("ws", "user-1")  # must not raise

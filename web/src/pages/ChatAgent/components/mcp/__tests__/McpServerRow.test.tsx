@@ -67,6 +67,7 @@ const handlers = () => ({
   onEdit: vi.fn(),
   onDiscover: vi.fn(),
   onDelete: vi.fn(),
+  onPromoteToTemplate: vi.fn(),
   onSetupSecret: vi.fn(),
 });
 
@@ -75,8 +76,10 @@ beforeEach(() => {
 });
 
 describe('McpServerRow — origin badge + base render', () => {
-  it('shows the workspace badge, tool count, and status pill', () => {
-    render(<McpServerRow server={makeServer()} {...handlers()} />);
+  it('shows the workspace badge, tool count, and connected pill when verified + synced', () => {
+    // A fully-settled server (verified AND applied to the live agent) collapses
+    // to the clean green pill — no perpetual lifecycle track.
+    render(<McpServerRow server={makeServer()} synced sandboxRunning {...handlers()} />);
     expect(screen.getByText('workspace')).toBeInTheDocument();
     expect(screen.getByText('3 tools')).toBeInTheDocument();
     expect(screen.getByTestId('mcp-status-connected')).toBeInTheDocument();
@@ -102,7 +105,7 @@ describe('McpServerRow — kebab menu (builtins restricted)', () => {
     const h = handlers();
     render(<McpServerRow server={makeServer({ origin: 'builtin', editable: false, deletable: false })} {...h} />);
 
-    for (const label of ['Edit', 'Test connection', 'Delete']) {
+    for (const label of ['Edit', 'Test connection', 'Save as template', 'Delete']) {
       const item = screen.getByText(label).closest('[role="menuitem"]')!;
       expect(item).toHaveAttribute('aria-disabled', 'true');
     }
@@ -110,11 +113,13 @@ describe('McpServerRow — kebab menu (builtins restricted)', () => {
     // Clicking a disabled item is a no-op.
     fireEvent.click(screen.getByText('Edit'));
     fireEvent.click(screen.getByText('Delete'));
+    fireEvent.click(screen.getByText('Save as template'));
     expect(h.onEdit).not.toHaveBeenCalled();
     expect(h.onDelete).not.toHaveBeenCalled();
+    expect(h.onPromoteToTemplate).not.toHaveBeenCalled();
   });
 
-  it('enables Edit/Test/Delete for a workspace server and fires handlers', () => {
+  it('enables Edit/Test/Save/Delete for a workspace server and fires handlers', () => {
     const h = handlers();
     render(<McpServerRow server={makeServer()} {...h} />);
 
@@ -124,8 +129,54 @@ describe('McpServerRow — kebab menu (builtins restricted)', () => {
     fireEvent.click(screen.getByText('Test connection'));
     expect(h.onDiscover).toHaveBeenCalledTimes(1);
 
+    fireEvent.click(screen.getByText('Save as template'));
+    expect(h.onPromoteToTemplate).toHaveBeenCalledTimes(1);
+
     fireEvent.click(screen.getByText('Delete'));
     expect(h.onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables "Save as template" when no promote handler is provided', () => {
+    const { onPromoteToTemplate, ...rest } = handlers();
+    void onPromoteToTemplate;
+    render(<McpServerRow server={makeServer()} {...rest} />);
+    const item = screen.getByText('Save as template').closest('[role="menuitem"]')!;
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('keeps a disabled workspace server re-enableable but ungates only the toggle', () => {
+    const h = handlers();
+    render(<McpServerRow server={makeServer({ enabled: false, status: 'disabled' })} {...h} />);
+
+    // The toggle is the way back on.
+    fireEvent.click(screen.getByRole('switch'));
+    expect(h.onToggle).toHaveBeenCalledWith(true);
+
+    // "Test connection" is off (discovery only runs against enabled servers)…
+    expect(screen.getByText('Test connection').closest('[role="menuitem"]'))
+      .toHaveAttribute('aria-disabled', 'true');
+
+    // …but Edit / Save as template / Delete still work on a disabled server.
+    fireEvent.click(screen.getByText('Edit'));
+    fireEvent.click(screen.getByText('Save as template'));
+    fireEvent.click(screen.getByText('Delete'));
+    expect(h.onEdit).toHaveBeenCalledTimes(1);
+    expect(h.onPromoteToTemplate).toHaveBeenCalledTimes(1);
+    expect(h.onDelete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('McpServerRow — in-flight affordances', () => {
+  it('shows the kebab spinner while deleting but NOT while toggling (optimistic)', () => {
+    // Toggle is optimistic — the switch already moved, so a spinning "reload"
+    // icon on the kebab is just flicker. Only a real delete (row leaving) spins.
+    const { container, rerender } = render(
+      <McpServerRow server={makeServer()} toggling {...handlers()} />,
+    );
+    expect(container.querySelector('.animate-spin')).toBeNull();
+
+    rerender(<McpServerRow server={makeServer()} deleting {...handlers()} />);
+    expect(container.querySelector('.animate-spin')).not.toBeNull();
   });
 });
 
@@ -148,13 +199,40 @@ describe('McpServerRow — status-specific affordances', () => {
     expect(h.onSetupSecret).toHaveBeenCalledWith('MY_API_KEY');
   });
 
-  it('shows the transient not-synced hint when flagged', () => {
-    render(<McpServerRow server={makeServer()} showNotSynced {...handlers()} />);
-    expect(screen.getByTestId('mcp-not-synced')).toBeInTheDocument();
+  it('shows the live lifecycle track (verifying) while a probe is in flight', () => {
+    render(
+      <McpServerRow server={makeServer({ status: 'pending' })} checking sandboxRunning {...handlers()} />,
+    );
+    // A still-progressing server shows the animated lifecycle track, not the
+    // (stale, about-to-change) backend status pill.
+    const track = screen.getByTestId('mcp-lifecycle');
+    expect(track).toHaveAttribute('data-phase', 'verifying');
+    expect(screen.getByText('Verifying…')).toBeInTheDocument();
+    expect(screen.queryByTestId('mcp-status-pending')).not.toBeInTheDocument();
   });
 
-  it('hides the not-synced hint when not flagged', () => {
-    render(<McpServerRow server={makeServer()} {...handlers()} />);
-    expect(screen.queryByTestId('mcp-not-synced')).not.toBeInTheDocument();
+  it('reads "Applying to agent…" when verified but not yet synced', () => {
+    // Discovery found the tools (connected) but the running agent hasn't loaded
+    // the new config yet (synced=false) — the apply axis is still in flight.
+    render(
+      <McpServerRow server={makeServer({ status: 'connected' })} synced={false} sandboxRunning {...handlers()} />,
+    );
+    const track = screen.getByTestId('mcp-lifecycle');
+    expect(track).toHaveAttribute('data-phase', 'applying');
+    expect(screen.getByText('Applying to agent…')).toBeInTheDocument();
+    expect(screen.queryByTestId('mcp-status-connected')).not.toBeInTheDocument();
+  });
+
+  it('suppresses the tool count while still verifying', () => {
+    render(
+      <McpServerRow
+        server={makeServer({ status: 'pending', tool_count: 5 })}
+        checking
+        sandboxRunning
+        {...handlers()}
+      />,
+    );
+    expect(screen.getByTestId('mcp-lifecycle')).toBeInTheDocument();
+    expect(screen.queryByText('5 tools')).not.toBeInTheDocument();
   });
 });

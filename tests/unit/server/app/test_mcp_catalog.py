@@ -49,7 +49,7 @@ async def client():
 
 
 @pytest.mark.asyncio
-async def test_list_masks_literals(client):
+async def test_list_masks_literals_and_reports_max(client):
     with patch(
         "src.server.app.mcp_catalog.list_catalog_servers",
         new=AsyncMock(return_value=[_row()]),
@@ -59,6 +59,7 @@ async def test_list_masks_literals(client):
     body = resp.json()
     assert "literal-value" not in resp.text
     assert body["servers"][0]["header_refs"] == ["API_KEY"]
+    assert body["max_servers"] == 50
 
 
 @pytest.mark.asyncio
@@ -100,6 +101,36 @@ async def test_create_rejects_bash(client):
         json={"name": "evil", "transport": "stdio", "command": "bash"},
     )
     assert resp.status_code == 422
+    # 422 detail is a flat string, not FastAPI's default list shape.
+    assert isinstance(resp.json()["detail"], str)
+
+
+@pytest.mark.asyncio
+async def test_create_over_cap_409(client):
+    with patch(
+        "src.server.app.mcp_catalog.create_catalog_server",
+        new=AsyncMock(
+            side_effect=ValueError(
+                "Maximum of 50 MCP catalog servers per user reached"
+            )
+        ),
+    ):
+        resp = await client.post(
+            "/api/v1/mcp/servers",
+            json={"name": "over_cap", "transport": "stdio", "command": "npx"},
+        )
+    assert resp.status_code == 409
+    assert "Maximum of 50" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_invalid_body_422_string_detail(client):
+    resp = await client.put(
+        "/api/v1/mcp/servers/remote_server",
+        json={"name": "remote_server", "transport": "stdio", "command": "bash"},
+    )
+    assert resp.status_code == 422
+    assert isinstance(resp.json()["detail"], str)
 
 
 @pytest.mark.asyncio

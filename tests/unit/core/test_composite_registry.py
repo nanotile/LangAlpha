@@ -181,3 +181,57 @@ def test_zero_user_server_summary_matches_builtin_registry():
     assert build_tool_summary_from_registry(composite, mode="summary") == (
         build_tool_summary_from_registry(reg, mode="summary")
     )
+
+
+# ---------------------------------------------------------------------------
+# §5 — a workspace-disabled built-in is excluded at runtime
+# ---------------------------------------------------------------------------
+
+
+def test_no_user_no_disabled_returns_builtin_identity():
+    """No user servers AND no disabled built-ins ⇒ the built-in object itself."""
+    reg = _make_builtin_registry()
+    composite = build_composite_registry(reg, [], {}, frozenset())
+    assert composite is reg
+
+
+def test_disabled_builtin_excluded_from_tools_connectors_config():
+    """A workspace-disabled built-in is absent from get_all_tools, connectors,
+    and the effective config servers — even with zero user servers."""
+    reg = _make_builtin_registry()
+    composite = build_composite_registry(
+        reg, [], {}, disabled_builtin_names=frozenset({"market"})
+    )
+    # Not the identity object (a disable forces a SchemaOnlyRegistry).
+    assert composite is not reg
+    assert isinstance(composite, SchemaOnlyRegistry)
+    # Excluded from tools, connectors, and effective config.
+    assert "market" not in composite.get_all_tools()
+    assert "market" not in composite.connectors
+    assert all(s.name != "market" for s in composite.config.mcp.servers)
+
+
+def test_disabled_builtin_excluded_alongside_user_server():
+    """Disabling a built-in still appends user servers; only the disabled one
+    drops out of tools/connectors/config."""
+    reg = _make_builtin_registry()
+    composite = build_composite_registry(
+        reg, [_user_server()], _user_schemas(), frozenset({"market"})
+    )
+    all_tools = composite.get_all_tools()
+    assert "market" not in all_tools
+    assert "userserver" in all_tools
+    assert "market" not in composite.connectors
+    server_names = {s.name for s in composite.config.mcp.servers}
+    assert "market" not in server_names
+    assert "userserver" in server_names
+
+
+def test_disabled_builtin_absent_from_summary():
+    """The prompt tool summary omits a workspace-disabled built-in."""
+    reg = _make_builtin_registry()
+    composite = build_composite_registry(
+        reg, [], {}, disabled_builtin_names=frozenset({"market"})
+    )
+    summary = build_tool_summary_from_registry(composite, mode="summary")
+    assert "market" not in summary

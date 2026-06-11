@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import React from 'react';
-import { McpStatusPill, NotSyncedHint } from '../McpStatusPill';
+import { McpStatusPill } from '../McpStatusPill';
 import type { McpStatus } from '../../../utils/api';
 
 describe('McpStatusPill — status matrix', () => {
@@ -31,12 +31,5 @@ describe('McpStatusPill — status matrix', () => {
     const pill = screen.getByTestId('mcp-status-pending');
     expect(pill).toHaveAttribute('title', expect.stringMatching(/waiting for discovery/i));
   });
-});
 
-describe('NotSyncedHint — transient frontend-only hint', () => {
-  it('renders the "applies shortly (within ~30s)" copy', () => {
-    render(<NotSyncedHint />);
-    expect(screen.getByTestId('mcp-not-synced')).toBeInTheDocument();
-    expect(screen.getByText(/not synced — applies shortly \(within ~30s\)/i)).toBeInTheDocument();
-  });
 });

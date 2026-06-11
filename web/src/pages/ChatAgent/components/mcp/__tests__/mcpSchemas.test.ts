@@ -146,6 +146,31 @@ describe('mcpSchemas — length caps', () => {
   });
 });
 
+describe('mcpSchemas — discovery_uses_secrets', () => {
+  it('is optional (validates when omitted)', () => {
+    expect(validateMcpServer(stdio()).ok).toBe(true);
+    expect(validateMcpServer(http()).ok).toBe(true);
+  });
+
+  it('accepts an explicit boolean on every transport', () => {
+    expect(validateMcpServer(stdio({ discovery_uses_secrets: true })).ok).toBe(true);
+    expect(validateMcpServer(http({ discovery_uses_secrets: true })).ok).toBe(true);
+    expect(
+      validateMcpServer({
+        name: 'sse_server',
+        transport: 'sse',
+        url: 'https://example.com/sse',
+        headers: {},
+        discovery_uses_secrets: false,
+      }).ok,
+    ).toBe(true);
+  });
+
+  it('rejects a non-boolean value', () => {
+    expect(validateMcpServer(stdio({ discovery_uses_secrets: 'yes' })).ok).toBe(false);
+  });
+});
+
 describe('mcpSchemas — collectVaultRefs', () => {
   it('returns sorted, de-duplicated vault names from a value map', () => {
     expect(

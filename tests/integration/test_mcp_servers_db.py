@@ -7,6 +7,8 @@ version-keyed discovery schema cache.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -36,11 +38,33 @@ class TestCatalogCrud:
             transport="http", url="https://example.test/mcp",
             headers={"Authorization": "${vault:TOKEN}"},
             description="d", instruction="i", tool_exposure_mode="detailed",
+            discovery_uses_secrets=True,
         )
         row = await get_catalog_server(seed_user["user_id"], "acme")
         assert row["name"] == "acme"
         assert row["headers"] == {"Authorization": "${vault:TOKEN}"}
         assert row["tool_exposure_mode"] == "detailed"
+        # discovery_uses_secrets must round-trip through the catalog (it used to be
+        # silently dropped, so promoting an auth-at-discovery server lost the flag).
+        assert row["discovery_uses_secrets"] is True
+
+    async def test_discovery_uses_secrets_defaults_false_and_updates(
+        self, seed_user, patched_get_db_connection
+    ):
+        from src.server.database.mcp_servers import (
+            create_catalog_server,
+            get_catalog_server,
+            update_catalog_server,
+        )
+
+        await create_catalog_server(seed_user["user_id"], "acme", command="npx")
+        row = await get_catalog_server(seed_user["user_id"], "acme")
+        assert row["discovery_uses_secrets"] is False
+        updated = await update_catalog_server(
+            seed_user["user_id"], "acme",
+            updates={"discovery_uses_secrets": True},
+        )
+        assert updated["discovery_uses_secrets"] is True
 
     async def test_duplicate_name_raises(self, seed_user, patched_get_db_connection):
         from src.server.database.mcp_servers import create_catalog_server
@@ -164,6 +188,124 @@ class TestWorkspaceRows:
             config={"transport": "stdio"},
         )
 
+    async def test_servers_and_version_snapshot_consistent(
+        self, seed_workspace, patched_get_db_connection
+    ):
+        """get_workspace_servers_and_version returns a (rows, version) pair from
+        one snapshot — they always agree with what each separate read sees."""
+        from src.server.database.mcp_servers import (
+            get_workspace_servers_and_version,
+            upsert_workspace_server,
+        )
+
+        wid = seed_workspace["workspace_id"]
+        rows, version = await get_workspace_servers_and_version(wid)
+        assert rows == [] and version == 0
+
+        await upsert_workspace_server(
+            wid, "acme", source="workspace", enabled=True,
+            config={"transport": "stdio"},
+        )
+        rows, version = await get_workspace_servers_and_version(wid)
+        assert [r["name"] for r in rows] == ["acme"]
+        # The version reflects exactly the writes visible in rows (no torn read).
+        assert version == 1
+        assert version == await _version(wid)
+
+    async def test_insert_conflict_returns_none_no_overwrite(
+        self, seed_workspace, patched_get_db_connection
+    ):
+        """A second insert of an existing name returns None (no silent UPDATE)
+        and does not bump the version or clobber the original config."""
+        from src.server.database.mcp_servers import (
+            get_workspace_servers_and_version,
+            insert_workspace_server,
+        )
+
+        wid = seed_workspace["workspace_id"]
+        first = await insert_workspace_server(
+            wid, "acme", config={"transport": "stdio", "command": "npx"},
+        )
+        assert first is not None
+        assert await _version(wid) == 1
+
+        # Second create of the same name: ON CONFLICT DO NOTHING ⇒ None.
+        second = await insert_workspace_server(
+            wid, "acme", config={"transport": "stdio", "command": "uvx"},
+        )
+        assert second is None
+        # Version unchanged and the original config survived (no overwrite).
+        assert await _version(wid) == 1
+        rows, _ = await get_workspace_servers_and_version(wid)
+        assert len(rows) == 1
+        assert rows[0]["config"]["command"] == "npx"
+
+    async def test_concurrent_insert_same_name_one_wins(
+        self, seed_workspace, patched_get_db_connection
+    ):
+        """Two concurrent creates of the SAME new name: exactly one inserts (201),
+        the other gets None (→ 409), never a silent last-write-wins overwrite."""
+        from src.server.database.mcp_servers import insert_workspace_server
+
+        wid = seed_workspace["workspace_id"]
+
+        async def _insert(cmd: str):
+            return await insert_workspace_server(
+                wid, "race", config={"transport": "stdio", "command": cmd},
+            )
+
+        results = await asyncio.gather(
+            _insert("npx"), _insert("uvx"), return_exceptions=True
+        )
+        winners = [r for r in results if isinstance(r, dict)]
+        losers = [r for r in results if r is None]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        # Exactly one row, one version bump.
+        assert await _version(wid) == 1
+
+    async def test_concurrent_inserts_at_cap_serialize(
+        self, seed_workspace, patched_get_db_connection
+    ):
+        """With MAX-1 rows present, two concurrent inserts of two DIFFERENT new
+        names race — the advisory xact lock serializes the count check, so
+        exactly one insert wins and the other trips the cap (ValueError)."""
+        from src.server.database.mcp_servers import (
+            MAX_MCP_SERVERS_PER_WORKSPACE,
+            list_workspace_servers,
+            upsert_workspace_server,
+        )
+
+        wid = seed_workspace["workspace_id"]
+        for i in range(MAX_MCP_SERVERS_PER_WORKSPACE - 1):
+            await upsert_workspace_server(
+                wid, f"srv_seed_{i}", source="workspace", enabled=True,
+                config={"transport": "stdio"},
+            )
+
+        async def _insert(name: str):
+            return await upsert_workspace_server(
+                wid, name, source="workspace", enabled=True,
+                config={"transport": "stdio"},
+            )
+
+        results = await asyncio.gather(
+            _insert("srv_a"), _insert("srv_b"), return_exceptions=True
+        )
+
+        successes = [r for r in results if not isinstance(r, BaseException)]
+        failures = [r for r in results if isinstance(r, BaseException)]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], ValueError)
+
+        # The workspace ends at exactly the cap; only the winning name landed.
+        rows = await list_workspace_servers(wid)
+        workspace_rows = [r for r in rows if r["source"] == "workspace"]
+        assert len(workspace_rows) == MAX_MCP_SERVERS_PER_WORKSPACE
+        names = {r["name"] for r in workspace_rows}
+        assert len(names & {"srv_a", "srv_b"}) == 1
+
 
 # ---------------------------------------------------------------------------
 # Discovery schema cache
@@ -171,7 +313,10 @@ class TestWorkspaceRows:
 
 
 class TestSchemaCache:
-    async def test_upsert_and_get_keyed_by_version(self, seed_workspace, patched_get_db_connection):
+    async def test_get_returns_latest_snapshot_per_server(self, seed_workspace, patched_get_db_connection):
+        """Each server's snapshot is keyed by its own config_hash; get returns
+        one row per server (the most recent), with the hash surfaced so the
+        caller can match it against the current config."""
         from src.server.database.mcp_servers import (
             get_tool_schemas,
             upsert_tool_schemas,
@@ -179,19 +324,35 @@ class TestSchemaCache:
 
         wid = seed_workspace["workspace_id"]
         await upsert_tool_schemas(
-            wid, "acme", 1,
+            wid, "acme", "hash-acme",
             tools=[{"name": "t1", "description": "d", "input_schema": {}}],
             status="ok",
         )
-        # Different version is a distinct cache entry.
-        await upsert_tool_schemas(wid, "acme", 2, status="pending")
+        await upsert_tool_schemas(wid, "beta", "hash-beta", status="pending")
 
-        v1 = await get_tool_schemas(wid, 1)
-        assert len(v1) == 1 and v1[0]["status"] == "ok"
-        assert v1[0]["tools"][0]["name"] == "t1"
+        rows = {r["server_name"]: r for r in await get_tool_schemas(wid)}
+        assert rows["acme"]["status"] == "ok"
+        assert rows["acme"]["config_hash"] == "hash-acme"
+        assert rows["acme"]["tools"][0]["name"] == "t1"
+        assert rows["beta"]["status"] == "pending"
+        assert rows["beta"]["config_hash"] == "hash-beta"
 
-        v2 = await get_tool_schemas(wid, 2)
-        assert len(v2) == 1 and v2[0]["status"] == "pending"
+    async def test_distinct_hash_is_a_distinct_entry_latest_wins(self, seed_workspace, patched_get_db_connection):
+        """A config change (new hash) for the same server is a distinct cache
+        row; get surfaces the most recently discovered one."""
+        from src.server.database.mcp_servers import (
+            get_tool_schemas,
+            upsert_tool_schemas,
+        )
+
+        wid = seed_workspace["workspace_id"]
+        await upsert_tool_schemas(wid, "acme", "hash-old", status="ok")
+        # A new config ⇒ new hash ⇒ a separate row, and it's the latest.
+        await upsert_tool_schemas(wid, "acme", "hash-new", status="pending")
+
+        rows = await get_tool_schemas(wid)
+        assert len(rows) == 1
+        assert rows[0]["config_hash"] == "hash-new" and rows[0]["status"] == "pending"
 
     async def test_upsert_replaces_same_key(self, seed_workspace, patched_get_db_connection):
         from src.server.database.mcp_servers import (
@@ -200,11 +361,11 @@ class TestSchemaCache:
         )
 
         wid = seed_workspace["workspace_id"]
-        await upsert_tool_schemas(wid, "acme", 1, status="pending")
+        await upsert_tool_schemas(wid, "acme", "hash-1", status="pending")
         await upsert_tool_schemas(
-            wid, "acme", 1, status="error", error="boom",
+            wid, "acme", "hash-1", status="error", error="boom",
         )
-        rows = await get_tool_schemas(wid, 1)
+        rows = await get_tool_schemas(wid)
         assert len(rows) == 1
         assert rows[0]["status"] == "error"
         assert rows[0]["error"] == "boom"

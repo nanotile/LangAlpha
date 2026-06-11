@@ -215,6 +215,151 @@ class TestNoVaultDiscovery:
         assert headers["Authorization"] == "Bearer "
 
 
+class TestDiscoveryUsesSecrets:
+    """Per-server discovery_uses_secrets gates whether discovery resolves real
+    secrets. Default (False) = secret-less probe even when the secret exists.
+    """
+
+    def test_default_off_discovery_ignores_present_stdio_secret(self, tmp_path):
+        # Secret IS present in the vault, but discovery_uses_secrets defaults off.
+        workdir = _write_vault(tmp_path, {"USER_TOKEN": "real-secret"})
+        gen = ToolFunctionGenerator()
+        server = MCPServerConfig(
+            name="user_srv",
+            transport="stdio",
+            command="npx",
+            args=["x"],
+            env={"TOKEN": "${vault:USER_TOKEN}"},
+            source="workspace",
+        )
+        ns = _exec_client(gen.generate_mcp_client_code([server], working_dir=workdir))
+        env = ns["_build_proc_env"](
+            ns["_SERVER_CONFIGS"]["user_srv"], "user_srv", discovery=True
+        )
+        # Secret-less posture: the present secret is NOT resolved during discovery.
+        assert env["TOKEN"] == ""
+        assert "real-secret" not in json.dumps(env)
+        # Normal (non-discovery) calls still resolve the real secret.
+        env_call = ns["_build_proc_env"](
+            ns["_SERVER_CONFIGS"]["user_srv"], "user_srv"
+        )
+        assert env_call["TOKEN"] == "real-secret"
+
+    def test_opt_in_discovery_resolves_present_stdio_secret(self, tmp_path):
+        workdir = _write_vault(tmp_path, {"USER_TOKEN": "real-secret"})
+        gen = ToolFunctionGenerator()
+        server = MCPServerConfig(
+            name="user_srv",
+            transport="stdio",
+            command="npx",
+            args=["x"],
+            env={"TOKEN": "${vault:USER_TOKEN}"},
+            source="workspace",
+            discovery_uses_secrets=True,
+        )
+        ns = _exec_client(gen.generate_mcp_client_code([server], working_dir=workdir))
+        env = ns["_build_proc_env"](
+            ns["_SERVER_CONFIGS"]["user_srv"], "user_srv", discovery=True
+        )
+        # Explicit opt-in: discovery resolves the real secret (today's behavior).
+        assert env["TOKEN"] == "real-secret"
+
+    def test_default_flag_http_auth_header_resolves_during_discovery(self, tmp_path):
+        # An authenticated remote server self-enables secret discovery even with
+        # the default flag — otherwise tools/list returns 401 (see
+        # discovery_should_use_secrets). Contrast the stdio default-off case.
+        workdir = _write_vault(tmp_path, {"USER_TOKEN": "real-secret"})
+        gen = ToolFunctionGenerator()
+        server = MCPServerConfig(
+            name="user_http",
+            transport="http",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer ${vault:USER_TOKEN}"},
+            source="workspace",
+        )
+        ns = _exec_client(gen.generate_mcp_client_code([server], working_dir=workdir))
+        _url, headers = ns["_resolve_sse"](
+            ns["_SERVER_CONFIGS"]["user_http"], "user_http", discovery=True
+        )
+        assert headers["Authorization"] == "Bearer real-secret"
+        # Normal call also resolves the real secret.
+        _u2, headers2 = ns["_resolve_sse"](
+            ns["_SERVER_CONFIGS"]["user_http"], "user_http"
+        )
+        assert headers2["Authorization"] == "Bearer real-secret"
+
+    def test_opt_in_discovery_resolves_present_http_secret(self, tmp_path):
+        workdir = _write_vault(tmp_path, {"USER_TOKEN": "real-secret"})
+        gen = ToolFunctionGenerator()
+        server = MCPServerConfig(
+            name="user_http",
+            transport="http",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer ${vault:USER_TOKEN}"},
+            source="workspace",
+            discovery_uses_secrets=True,
+        )
+        ns = _exec_client(gen.generate_mcp_client_code([server], working_dir=workdir))
+        _url, headers = ns["_resolve_sse"](
+            ns["_SERVER_CONFIGS"]["user_http"], "user_http", discovery=True
+        )
+        assert headers["Authorization"] == "Bearer real-secret"
+
+    def test_flag_embedded_in_workspace_config(self, tmp_path):
+        workdir = _write_vault(tmp_path, {})
+        gen = ToolFunctionGenerator()
+        server = MCPServerConfig(
+            name="user_srv",
+            transport="stdio",
+            command="npx",
+            args=["x"],
+            source="workspace",
+            discovery_uses_secrets=True,
+        )
+        ns = _exec_client(gen.generate_mcp_client_code([server], working_dir=workdir))
+        assert ns["_SERVER_CONFIGS"]["user_srv"]["discovery_uses_secrets"] is True
+
+    def test_remote_vault_header_auto_enables_discovery_secrets(self, tmp_path):
+        """A workspace remote server whose header references a vault secret is
+        authenticated, so the generated client resolves secrets during discovery
+        even though the stored flag is the default (False)."""
+        workdir = _write_vault(tmp_path, {"USER_TOKEN": "real-secret"})
+        gen = ToolFunctionGenerator()
+        server = MCPServerConfig(
+            name="user_http",
+            transport="http",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer ${vault:USER_TOKEN}"},
+            source="workspace",
+            # NOT set — defaults to False; the vault-ref header forces it on.
+        )
+        ns = _exec_client(gen.generate_mcp_client_code([server], working_dir=workdir))
+        assert ns["_SERVER_CONFIGS"]["user_http"]["discovery_uses_secrets"] is True
+        _url, headers = ns["_resolve_sse"](
+            ns["_SERVER_CONFIGS"]["user_http"], "user_http", discovery=True
+        )
+        assert headers["Authorization"] == "Bearer real-secret"
+
+    def test_builtin_only_client_omits_flag_byte_stable(self):
+        """The new key only appears for workspace servers; a builtin-only config
+        must not gain it (or any vault machinery)."""
+        gen = ToolFunctionGenerator()
+        servers = [
+            MCPServerConfig(
+                name="data_srv",
+                transport="stdio",
+                command="node",
+                args=["srv.js"],
+                env={"PLACEHOLDER_KEY": "x"},
+            ),
+            MCPServerConfig(
+                name="remote_srv", transport="sse", url="https://example.test/mcp"
+            ),
+        ]
+        code = gen.generate_mcp_client_code(servers)
+        assert "discovery_uses_secrets" not in code
+
+
 class TestDiscoverEntrypoint:
     """discover() shape + presence."""
 
@@ -289,3 +434,122 @@ class TestWorkspaceToolTextSanitized:
         gen = ToolFunctionGenerator()
         module = gen.generate_tool_module("srv", [tool])
         assert "A plain builtin description." in module
+
+
+def _has_call(node) -> bool:
+    """True if the AST subtree contains any function/attribute Call."""
+    return any(isinstance(n, ast.Call) for n in ast.walk(node))
+
+
+class TestToolNameInjection:
+    """§1 — a hostile tool name can't escape the _call_mcp_tool string literal."""
+
+    def test_hostile_tool_name_does_not_inject_code(self):
+        from ptc_agent.core.mcp_registry import MCPToolInfo
+
+        # A name crafted to break out of the f-string literal and run code.
+        hostile = 'x", __import__("os").system("touch /tmp/pwned") and (arguments) #'
+        tool = MCPToolInfo(
+            name=hostile,
+            description="probe",
+            input_schema={"type": "object", "properties": {}},
+            server_name="user_srv",
+        )
+        gen = ToolFunctionGenerator()
+        module = gen.generate_tool_module("user_srv", [tool], source="workspace")
+        tree = ast.parse(module)  # must parse — the breakout is inert
+
+        # The hostile name survives ONLY as inert data inside a string literal
+        # passed to _call_mcp_tool; the only Call in any wrapper body is
+        # _call_mcp_tool and no __import__/system Call was injected.
+        funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+        assert funcs, "expected at least one generated wrapper"
+        for fn in funcs:
+            call_names = {
+                getattr(c.func, "id", getattr(c.func, "attr", None))
+                for c in ast.walk(fn)
+                if isinstance(c, ast.Call)
+            }
+            # Only the wrapper's own calls survive (`_call_mcp_tool` + the
+            # template's `arguments.items()` None-strip); no injected call.
+            assert call_names <= {"_call_mcp_tool", "items"}
+            # No __import__ name reference smuggled in.
+            assert not any(
+                isinstance(n, ast.Name) and n.id == "__import__"
+                for n in ast.walk(fn)
+            )
+
+    def test_builtin_call_line_byte_identical(self):
+        """Builtin codegen keeps the historical double-quoted literal."""
+        from ptc_agent.core.mcp_registry import MCPToolInfo
+
+        tool = MCPToolInfo(
+            name="get_price",
+            description="probe",
+            input_schema={"type": "object", "properties": {}},
+            server_name="market",
+        )
+        gen = ToolFunctionGenerator()
+        module = gen.generate_tool_module("market", [tool])
+        assert '_call_mcp_tool("market", "get_price", arguments)' in module
+
+
+class TestParamNameInjection:
+    """§2 — a hostile param name can't inject code into the signature/arg dict."""
+
+    def test_hostile_param_name_skipped_module_parses(self):
+        from ptc_agent.core.mcp_registry import MCPToolInfo
+
+        tool = MCPToolInfo(
+            name="probe",
+            description="probe",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    # Hostile key that would break the signature / arg-dict.
+                    'q): import os; os.system("x") #': {"type": "string"},
+                    # A salvageable name survives, sanitized to an identifier.
+                    "ok-name": {"type": "string"},
+                },
+                "required": [],
+            },
+            server_name="user_srv",
+        )
+        gen = ToolFunctionGenerator()
+        module = gen.generate_tool_module("user_srv", [tool], source="workspace")
+        tree = ast.parse(module)  # must parse cleanly
+        # The hostile key was sanitized to an identifier — no os.system Call and
+        # no `import os` statement was injected. (The module legitimately
+        # contains the template's `import json`.)
+        assert not any(
+            isinstance(n, ast.Attribute) and n.attr == "system"
+            for n in ast.walk(tree)
+        )
+        imported = {
+            alias.name
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Import)
+            for alias in n.names
+        }
+        assert "os" not in imported
+        # The salvageable param survives under its sanitized identifier.
+        assert "ok_name" in module
+
+    def test_workspace_arg_dict_key_is_repr(self):
+        from ptc_agent.core.mcp_registry import MCPToolInfo
+
+        tool = MCPToolInfo(
+            name="probe",
+            description="probe",
+            input_schema={
+                "type": "object",
+                "properties": {"sym": {"type": "string"}},
+                "required": ["sym"],
+            },
+            server_name="user_srv",
+        )
+        gen = ToolFunctionGenerator()
+        module = gen.generate_tool_module("user_srv", [tool], source="workspace")
+        ast.parse(module)
+        # Key emitted via repr (single-quoted), value references the identifier.
+        assert "'sym': sym," in module

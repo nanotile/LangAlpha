@@ -10,6 +10,7 @@ import {
   useAddWorkspaceMcpServer,
   useDeleteWorkspaceMcpServer,
   useCreateMcpCatalogServer,
+  useDelayedFalse,
 } from '../useMcpServers';
 import type { EffectiveServerList } from '../../pages/ChatAgent/utils/api';
 
@@ -97,7 +98,7 @@ describe('useWorkspaceMcpServers', () => {
 });
 
 describe('useToggleWorkspaceMcpServer — optimistic with rollback', () => {
-  it('optimistically flips enabled, then settles', async () => {
+  it('optimistically flips enabled AND reconciles status, then settles', async () => {
     const client = makeClient();
     client.setQueryData(queryKeys.mcp.workspace(WS), makeList([makeServer('s1', true)]));
     (setWorkspaceMcpServerEnabled as Mock).mockResolvedValue({ name: 's1', enabled: false });
@@ -108,13 +109,36 @@ describe('useToggleWorkspaceMcpServer — optimistic with rollback', () => {
       result.current.mutate({ name: 's1', enabled: false });
     });
 
-    // Optimistic update applies synchronously in onMutate.
+    // Optimistic update applies synchronously in onMutate — enabled AND status
+    // flip together so the row never renders an incoherent pair (the glitch).
     await waitFor(() => {
       const cached = client.getQueryData<EffectiveServerList>(queryKeys.mcp.workspace(WS));
       expect(cached?.servers[0].enabled).toBe(false);
+      expect(cached?.servers[0].status).toBe('disabled');
     });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  });
+
+  it('enabling a disabled server optimistically goes straight to connected (no verify flash)', async () => {
+    const client = makeClient();
+    const disabled = { ...makeServer('s1', false), status: 'disabled' as const };
+    client.setQueryData(queryKeys.mcp.workspace(WS), makeList([disabled]));
+    (setWorkspaceMcpServerEnabled as Mock).mockResolvedValue({ name: 's1', enabled: true });
+
+    const { result } = renderHook(() => useToggleWorkspaceMcpServer(WS), { wrapper: wrapperFor(client) });
+
+    act(() => {
+      result.current.mutate({ name: 's1', enabled: true });
+    });
+
+    await waitFor(() => {
+      const cached = client.getQueryData<EffectiveServerList>(queryKeys.mcp.workspace(WS));
+      expect(cached?.servers[0].enabled).toBe(true);
+      // 'connected' (re-enable reconnects from the cached schema) — NOT 'pending'
+      // (would flash "Verifying…") and NOT the stale 'disabled' (would flash "Ready").
+      expect(cached?.servers[0].status).toBe('connected');
+    });
   });
 
   it('rolls back the optimistic update on error', async () => {
@@ -132,6 +156,54 @@ describe('useToggleWorkspaceMcpServer — optimistic with rollback', () => {
     // After rollback the cached row is back to enabled=true.
     const cached = client.getQueryData<EffectiveServerList>(queryKeys.mcp.workspace(WS));
     expect(cached?.servers[0].enabled).toBe(true);
+  });
+});
+
+describe('useDelayedFalse — apply-axis anti-flicker', () => {
+  it('holds true through a sub-delay dip to false, but lets a lasting false through', () => {
+    vi.useFakeTimers();
+    try {
+      const { result, rerender } = renderHook(({ v }) => useDelayedFalse(v, 2600), {
+        initialProps: { v: true },
+      });
+      expect(result.current).toBe(true);
+
+      // A bump dips synced false; the row must NOT flash out of "Connected".
+      act(() => { rerender({ v: false }); });
+      expect(result.current).toBe(true);
+
+      // Apply lands within the window → never showed the dip.
+      act(() => { rerender({ v: true }); });
+      act(() => { vi.advanceTimersByTime(3000); });
+      expect(result.current).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('propagates a false that outlasts the delay (a genuinely lagging apply)', () => {
+    vi.useFakeTimers();
+    try {
+      const { result, rerender } = renderHook(({ v }) => useDelayedFalse(v, 2600), {
+        initialProps: { v: true },
+      });
+      act(() => { rerender({ v: false }); });
+      expect(result.current).toBe(true); // still held
+      act(() => { vi.advanceTimersByTime(2700); });
+      expect(result.current).toBe(false); // outlasted the window → honest "Applying…"
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('propagates an initial-mount false immediately (no spurious "synced")', () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useDelayedFalse(false, 2600));
+      expect(result.current).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

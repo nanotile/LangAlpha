@@ -15,7 +15,10 @@ from src.server.models.mcp_server import (
     ALLOWED_COMMANDS,
     McpServerInput,
     catalog_row_to_response,
+    coerce_mcp_name,
     collect_vault_refs,
+    normalize_transport,
+    parse_mcp_servers_payload,
     validate_remote_url,
 )
 
@@ -127,6 +130,7 @@ def test_url_accepts_public_https():
         "https://192.168.1.1/mcp",  # private 192.168/16
         "https://127.0.0.1/mcp",  # loopback
         "https://169.254.169.254/latest/meta-data",  # link-local metadata
+        "https://100.64.0.1/mcp",  # CGNAT 100.64/10 (not is_global)
         "https://[::1]/mcp",  # ipv6 loopback
         "https://localhost/mcp",  # localhost
         "https://svc.local/mcp",  # *.local
@@ -203,6 +207,38 @@ def test_tool_exposure_mode_enum():
         McpServerInput(**_stdio(tool_exposure_mode="verbose"))
 
 
+def test_discovery_uses_secrets_defaults_off_and_round_trips():
+    # Default is the safe secret-less posture.
+    assert McpServerInput(**_stdio()).discovery_uses_secrets is False
+    assert McpServerInput(**_stdio()).to_config_blob()["discovery_uses_secrets"] is False
+    # Explicit opt-in round-trips into the persisted config blob.
+    srv = McpServerInput(**_stdio(discovery_uses_secrets=True))
+    assert srv.discovery_uses_secrets is True
+    assert srv.to_config_blob()["discovery_uses_secrets"] is True
+
+
+def test_catalog_row_discovery_uses_secrets_in_response():
+    row = {
+        "name": "remote_server",
+        "transport": "http",
+        "command": None,
+        "args": [],
+        "url": "https://api.example.com/mcp",
+        "env": {},
+        "headers": {},
+        "description": "",
+        "instruction": "",
+        "tool_exposure_mode": "summary",
+        "discovery_uses_secrets": True,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    assert catalog_row_to_response(row).discovery_uses_secrets is True
+    # A row missing the field defaults to off.
+    del row["discovery_uses_secrets"]
+    assert catalog_row_to_response(row).discovery_uses_secrets is False
+
+
 # ---------------------------------------------------------------------------
 # Forbidden keys — reject, don't strip
 # ---------------------------------------------------------------------------
@@ -252,3 +288,103 @@ def test_catalog_row_response_masks_literals():
     dumped = resp.model_dump_json()
     assert "literal-value" not in dumped
     assert resp.header_refs == ["API_KEY"]
+
+
+# ---------------------------------------------------------------------------
+# Standard `mcpServers` JSON parser
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_mcp_name_underscores_illegal_chars():
+    name, renamed = coerce_mcp_name("my-stock-mcp.v2")
+    assert name == "my_stock_mcp_v2" and renamed is True
+
+
+def test_coerce_mcp_name_prefixes_leading_digit():
+    name, renamed = coerce_mcp_name("3rd-party")
+    assert name == "_3rd_party" and renamed is True
+
+
+def test_coerce_mcp_name_passthrough_when_already_legal():
+    name, renamed = coerce_mcp_name("already_ok")
+    assert name == "already_ok" and renamed is False
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("streamablehttp", "http"),
+        ("streamable-http", "http"),
+        ("streamable_http", "http"),
+        ("streamableHttp", "http"),
+        ("http", "http"),
+        ("sse", "sse"),
+        ("stdio", "stdio"),
+    ],
+)
+def test_normalize_transport_aliases(raw, expected):
+    assert normalize_transport(raw, has_command=False, has_url=True) == expected
+
+
+def test_normalize_transport_infers_from_fields():
+    assert normalize_transport(None, has_command=True, has_url=False) == "stdio"
+    assert normalize_transport(None, has_command=False, has_url=True) == "http"
+    assert normalize_transport(None, has_command=False, has_url=False) is None
+    assert normalize_transport("nonsense", has_command=False, has_url=True) is None
+
+
+def test_parse_unwraps_mcp_servers_and_maps_remote():
+    blob = {
+        "mcpServers": {
+            "my-stock-mcp": {
+                "type": "streamablehttp",
+                "url": "https://api.example.com/ds/stock",
+                "headers": {"Authorization": "EXAMPLE-OPAQUE-TOKEN"},
+            }
+        }
+    }
+    [entry] = parse_mcp_servers_payload(blob)
+    assert entry.error is None
+    assert entry.original_name == "my-stock-mcp"
+    assert entry.name == "my_stock_mcp" and entry.renamed is True
+    assert entry.config["transport"] == "http"
+    assert entry.config["url"] == "https://api.example.com/ds/stock"
+    # Literal secret stays inline for the endpoint to extract.
+    assert entry.config["headers"] == {"Authorization": "EXAMPLE-OPAQUE-TOKEN"}
+    # The original config feeds a valid McpServerInput once the literal is vaulted.
+    server = McpServerInput(
+        **{**entry.config, "headers": {"Authorization": "${vault:TOK}"}}
+    )
+    assert server.transport == "http"
+
+
+def test_parse_infers_stdio_from_command_and_drops_unknown_keys():
+    blob = {"mcpServers": {"local_time": {"command": "uvx", "args": ["pkg"], "disabled": True}}}
+    [entry] = parse_mcp_servers_payload(blob)
+    assert entry.config["transport"] == "stdio"
+    assert entry.config["command"] == "uvx"
+    assert "disabled" not in entry.config  # unknown keys dropped on purpose
+
+
+def test_parse_bare_map_without_wrapper():
+    blob = {"srv_a": {"command": "npx"}, "srv_b": {"url": "https://api.example.com/m"}}
+    entries = {e.name: e for e in parse_mcp_servers_payload(blob)}
+    assert entries["srv_a"].config["transport"] == "stdio"
+    assert entries["srv_b"].config["transport"] == "http"
+
+
+def test_parse_single_self_naming_object():
+    blob = {"name": "solo", "command": "node", "args": ["x"]}
+    [entry] = parse_mcp_servers_payload(blob)
+    assert entry.name == "solo" and entry.config["transport"] == "stdio"
+
+
+def test_parse_undetermined_transport_marks_error():
+    blob = {"mcpServers": {"weird": {"foo": "bar"}}}
+    [entry] = parse_mcp_servers_payload(blob)
+    assert entry.error is not None and not entry.config
+
+
+def test_parse_non_dict_payload_is_empty():
+    assert parse_mcp_servers_payload("not a dict") == []
+    assert parse_mcp_servers_payload(None) == []

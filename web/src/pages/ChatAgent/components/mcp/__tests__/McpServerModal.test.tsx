@@ -62,6 +62,68 @@ describe('McpServerModal — conditional fields per transport', () => {
     expect(screen.getByRole('button', { name: 'summary' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'detailed' })).toBeInTheDocument();
   });
+
+  it('renders the discovery-secrets toggle, off by default', () => {
+    render(<McpServerModal {...baseProps} />);
+    const checkbox = screen.getByRole('checkbox', { name: /use my secrets during discovery/i });
+    expect(checkbox).toBeInTheDocument();
+    expect(checkbox).not.toBeChecked();
+  });
+});
+
+describe('McpServerModal — discovery_uses_secrets toggle', () => {
+  it('defaults discovery_uses_secrets to false in the submit payload', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerModal {...baseProps} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByPlaceholderText('my_server'), { target: { value: 'good_name' } });
+    fireEvent.click(screen.getByRole('button', { name: /^add$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ discovery_uses_secrets: false }),
+    );
+  });
+
+  it('includes discovery_uses_secrets=true in the payload when toggled on', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerModal {...baseProps} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByPlaceholderText('my_server'), { target: { value: 'good_name' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /use my secrets during discovery/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^add$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ discovery_uses_secrets: true }),
+    );
+  });
+
+  it('pre-fills the toggle from the edited server', () => {
+    const initial = {
+      name: 'srv',
+      origin: 'workspace' as const,
+      transport: 'stdio',
+      enabled: true,
+      editable: true,
+      deletable: true,
+      status: 'connected' as const,
+      error: '',
+      tool_count: 0,
+      tools: [],
+      missing_secrets: [],
+      env_refs: [],
+      header_refs: [],
+      description: '',
+      instruction: '',
+      tool_exposure_mode: 'summary',
+      discovery_uses_secrets: true,
+      command: 'npx',
+      args: [],
+      url: null,
+      config_version: 1,
+    };
+    render(<McpServerModal {...baseProps} initial={initial} />);
+    expect(
+      screen.getByRole('checkbox', { name: /use my secrets during discovery/i }),
+    ).toBeChecked();
+  });
 });
 
 describe('McpServerModal — validation gating', () => {

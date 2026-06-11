@@ -80,16 +80,16 @@ class TestManifestRegression:
         # Stable across calls (deterministic).
         assert h == sandbox._compute_user_mcp_config_hash()
 
-    def test_user_mcp_config_hash_ignores_secret_values(self):
-        """Hash captures header/env key NAMES only — never their values, so a
-        rotated secret does not churn the manifest."""
+    def test_user_mcp_config_hash_ignores_literal_secret_values(self):
+        """Hash never embeds literal values — rotating a literal (non-vault)
+        value under the same key does not churn the manifest."""
         c1 = _make_config(
             servers=[
                 _user(
                     "notes",
                     transport="http",
                     url="https://example.test/mcp",
-                    headers={"Authorization": "${vault:TOKEN_A}"},
+                    headers={"Authorization": "literal-old"},
                 )
             ]
         )
@@ -99,13 +99,59 @@ class TestManifestRegression:
                     "notes",
                     transport="http",
                     url="https://example.test/mcp",
-                    headers={"Authorization": "${vault:TOKEN_B}"},
+                    headers={"Authorization": "literal-new"},
                 )
             ]
         )
         assert (
             _make_sandbox(c1)._compute_user_mcp_config_hash()
             == _make_sandbox(c2)._compute_user_mcp_config_hash()
+        )
+
+    def test_user_mcp_config_hash_changes_on_vault_ref_retarget(self):
+        """Retargeting a vault ref under the SAME key (${vault:A} → ${vault:B})
+        changes which secret the regenerated client embeds, so the hash MUST
+        churn → re-upload (regression: stale secret ref otherwise)."""
+        c1 = _make_config(
+            servers=[
+                _user(
+                    "notes",
+                    transport="http",
+                    url="https://example.test/mcp",
+                    headers={"Authorization": "${vault:SECRET_A}"},
+                )
+            ]
+        )
+        c2 = _make_config(
+            servers=[
+                _user(
+                    "notes",
+                    transport="http",
+                    url="https://example.test/mcp",
+                    headers={"Authorization": "${vault:SECRET_B}"},
+                )
+            ]
+        )
+        assert (
+            _make_sandbox(c1)._compute_user_mcp_config_hash()
+            != _make_sandbox(c2)._compute_user_mcp_config_hash()
+        )
+
+    def test_user_mcp_config_hash_changes_on_url_vault_ref_retarget(self):
+        """A vault ref retarget inside the URL also churns the hash."""
+        c1 = _make_config(
+            servers=[
+                _user("notes", transport="http", url="https://example.test/${vault:SECRET_A}")
+            ]
+        )
+        c2 = _make_config(
+            servers=[
+                _user("notes", transport="http", url="https://example.test/${vault:SECRET_B}")
+            ]
+        )
+        assert (
+            _make_sandbox(c1)._compute_user_mcp_config_hash()
+            != _make_sandbox(c2)._compute_user_mcp_config_hash()
         )
 
     def test_user_mcp_config_hash_changes_on_header_name(self):
@@ -126,6 +172,67 @@ class TestManifestRegression:
         assert (
             _make_sandbox(c1)._compute_user_mcp_config_hash()
             != _make_sandbox(c2)._compute_user_mcp_config_hash()
+        )
+
+    def test_user_mcp_config_hash_changes_on_discovery_uses_secrets_toggle(self):
+        """Flipping discovery_uses_secrets changes the generated client's vault
+        gating, so the manifest hash MUST churn → re-upload.
+
+        Uses a STDIO server: the flag is meaningful there (it guards an
+        untrusted subprocess). For a remote server with a vault-ref header the
+        effective value is always on, so the toggle is a no-op — covered by
+        ``test_remote_auth_header_forces_discovery_secrets_in_hash`` below.
+        """
+        c_off = _make_config(
+            servers=[
+                _user(
+                    "notes",
+                    transport="stdio",
+                    command="npx",
+                    args=["x"],
+                    env={"TOK": "${vault:K}"},
+                    discovery_uses_secrets=False,
+                )
+            ]
+        )
+        c_on = _make_config(
+            servers=[
+                _user(
+                    "notes",
+                    transport="stdio",
+                    command="npx",
+                    args=["x"],
+                    env={"TOK": "${vault:K}"},
+                    discovery_uses_secrets=True,
+                )
+            ]
+        )
+        assert (
+            _make_sandbox(c_off)._compute_user_mcp_config_hash()
+            != _make_sandbox(c_on)._compute_user_mcp_config_hash()
+        )
+
+    def test_remote_auth_header_forces_discovery_secrets_in_hash(self):
+        """A remote server with a vault-ref header is authenticated: its
+        effective discovery-uses-secrets is on regardless of the stored flag, so
+        toggling the stored flag does NOT churn the hash (the runtime behavior
+        is identical)."""
+        def _cfg(flag):
+            return _make_config(
+                servers=[
+                    _user(
+                        "notes",
+                        transport="http",
+                        url="https://example.test/mcp",
+                        headers={"Authorization": "${vault:K}"},
+                        discovery_uses_secrets=flag,
+                    )
+                ]
+            )
+
+        assert (
+            _make_sandbox(_cfg(False))._compute_user_mcp_config_hash()
+            == _make_sandbox(_cfg(True))._compute_user_mcp_config_hash()
         )
 
     @pytest.mark.asyncio
@@ -157,6 +264,42 @@ class TestManifestRegression:
         manifest = await sandbox._compute_sandbox_manifest()
         source_versions = manifest["modules"]["tool_modules"]["source_versions"]
         assert "user_mcp_config" in source_versions
+
+
+# ---------------------------------------------------------------------------
+# Regression #3 — doc filename can't traverse out of the docs dir
+# ---------------------------------------------------------------------------
+
+
+class TestDocPathTraversal:
+    """A hostile workspace tool name maps to a contained doc filename."""
+
+    def _doc_path(self, work_dir, server_name, tool_name, source):
+        # Mirrors the filename logic in PTCSandbox._install_tool_modules.
+        from ptc_agent.core.mcp_sanitize import sanitize_tool_name
+
+        if source == "workspace":
+            doc_name = sanitize_tool_name(tool_name) or "_invalid_tool"
+        else:
+            doc_name = tool_name
+        return f"{work_dir}/tools/docs/{server_name}/{doc_name}.md"
+
+    def test_traversal_name_is_contained(self):
+        work_dir = "/home/workspace"
+        server = "user_srv"
+        base = f"{work_dir}/tools/docs/{server}/"
+        for hostile in ("../mcp_client", "../../_internal/.vault_secrets", "a/b", ".."):
+            path = self._doc_path(work_dir, server, hostile, "workspace")
+            assert path.startswith(base)
+            # No traversal component or separator escapes the server's docs dir.
+            assert ".." not in path[len(base):]
+            assert "/" not in path[len(base):].removesuffix(".md")
+
+    def test_builtin_doc_path_unchanged(self):
+        # Builtin names are already valid identifiers ⇒ byte-identical path.
+        work_dir = "/home/workspace"
+        path = self._doc_path(work_dir, "market", "get_price", "builtin")
+        assert path == "/home/workspace/tools/docs/market/get_price.md"
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +472,31 @@ class TestDiscoverUserMcpSchemas:
         # One server timing out must not starve the other.
         assert out["alpha"]["status"] == "error"
         assert out["beta"]["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_pending_server_merged_into_discovery_client(self, discovery_sandbox):
+        """On-demand discovery of a server the live session has not re-resolved
+        yet (added/edited post-warm) regenerates the client INCLUDING it,
+        without dropping the session's other servers (the /discover staleness
+        fix)."""
+        sandbox = discovery_sandbox
+        captured: dict[str, list[str]] = {}
+
+        def capture(servers, working_dir="/home/workspace"):
+            captured["names"] = [s.name for s in servers]
+            return "# client"
+
+        sandbox.tool_generator.generate_mcp_client_code = MagicMock(side_effect=capture)
+        sandbox.adownload_file_bytes = AsyncMock(return_value=None)
+
+        # 'gamma' is NOT in the session config (alpha, beta) — a pending add.
+        gamma = _user("gamma", transport="http", url="https://g.test")
+        await sandbox.discover_user_mcp_schemas([gamma])
+
+        assert "gamma" in captured["names"]  # pending server reaches the client
+        assert {"alpha", "beta"}.issubset(
+            set(captured["names"])
+        )  # session servers not dropped
 
     @pytest.mark.asyncio
     async def test_uploads_client_before_discovery(self, discovery_sandbox):

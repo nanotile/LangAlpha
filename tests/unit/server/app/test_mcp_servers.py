@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from src.ptc_agent.config.core import MCPServerConfig
 from src.server.app.mcp_servers import _derive_status
 from src.server.handlers.chat.mcp_config import ResolvedMCP
+from src.server.services.mcp_discovery import mcp_discovery_fingerprint
 from tests.conftest import create_test_app
 
 NOW = datetime.now(timezone.utc)
@@ -75,40 +76,42 @@ async def client():
 
 
 def test_status_builtin_is_connected():
-    status, err = _derive_status(
-        origin="builtin", enabled=True, env_refs=[], header_refs=[],
+    status, err, missing = _derive_status(
+        origin="builtin", env_refs=[], header_refs=[],
         secret_names=set(), schema_row=None,
     )
-    assert status == "connected" and err == ""
+    assert status == "connected" and err == "" and missing == []
 
 
 def test_status_needs_secret_when_ref_missing():
-    status, _ = _derive_status(
-        origin="workspace", enabled=True, env_refs=[], header_refs=["API_KEY"],
+    status, _, missing = _derive_status(
+        origin="workspace", env_refs=[], header_refs=["API_KEY"],
         secret_names=set(), schema_row={"status": "ok", "tools": []},
     )
     assert status == "needs_secret"
+    assert missing == ["API_KEY"]
 
 
 def test_status_connected_when_schema_ok_and_secret_present():
-    status, _ = _derive_status(
-        origin="workspace", enabled=True, env_refs=[], header_refs=["API_KEY"],
+    status, _, missing = _derive_status(
+        origin="workspace", env_refs=[], header_refs=["API_KEY"],
         secret_names={"API_KEY"}, schema_row={"status": "ok", "tools": []},
     )
     assert status == "connected"
+    assert missing == []
 
 
 def test_status_error_passes_text():
-    status, err = _derive_status(
-        origin="workspace", enabled=True, env_refs=[], header_refs=[],
+    status, err, _ = _derive_status(
+        origin="workspace", env_refs=[], header_refs=[],
         secret_names=set(), schema_row={"status": "error", "error": "boom"},
     )
     assert status == "error" and err == "boom"
 
 
 def test_status_pending_when_no_schema_row():
-    status, _ = _derive_status(
-        origin="workspace", enabled=True, env_refs=[], header_refs=[],
+    status, _, _ = _derive_status(
+        origin="workspace", env_refs=[], header_refs=[],
         secret_names=set(), schema_row=None,
     )
     assert status == "pending"
@@ -133,7 +136,8 @@ async def test_list_effective_servers_masks_and_decorates(client):
     schema_rows = [
         {"server_name": "remote_server", "status": "ok",
          "tools": [{"name": "search", "description": "d", "input_schema": {}}],
-         "error": "", "config_version": 3, "discovered_at": NOW.isoformat()},
+         "error": "", "config_hash": mcp_discovery_fingerprint(user_srv),
+         "discovered_at": NOW.isoformat()},
     ]
     with (
         patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
@@ -147,6 +151,7 @@ async def test_list_effective_servers_masks_and_decorates(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["sandbox_running"] is True
+    assert body["sandbox_warming"] is False  # already running ⇒ not warming
     assert body["max_servers"] == 20
     assert body["config_version"] == 3
     by_name = {s["name"]: s for s in body["servers"]}
@@ -159,8 +164,140 @@ async def test_list_effective_servers_masks_and_decorates(client):
     assert us["origin"] == "workspace" and us["status"] == "connected"
     assert us["header_refs"] == ["API_KEY"]
     assert us["tool_count"] == 1
+    # tool_exposure_mode is non-null: a config None coalesces to "summary".
+    assert us["tool_exposure_mode"] == "summary"
+    assert bi["tool_exposure_mode"] == "summary"
     # Literal vault-ref string is never echoed as a raw header value.
     assert "Authorization" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_applied_config_version(client):
+    """The running session's applied version flows into the response so the UI
+    can show a version-accurate "synced/applying" state instead of a timer."""
+    ws = _ws()
+    base = _agent_config([_builtin()])
+    resolved = ResolvedMCP(
+        servers=[_builtin()],
+        builtin_names=frozenset({"builtin_search"}),
+        user_names=frozenset(),
+        version=3,
+    )
+    wm = MagicMock()
+    wm.get_applied_mcp_config_version.return_value = 2  # behind the saved version
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.resolve_mcp_config", new=AsyncMock(return_value=resolved)),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.get_tool_schemas", new=AsyncMock(return_value=[])),
+        patch("src.server.app.mcp_servers.WorkspaceManager.get_instance", return_value=wm),
+    ):
+        resp = await client.get(f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["config_version"] == 3
+    # applied (2) < saved (3) ⇒ the UI reads "applying", not "synced".
+    assert body["applied_config_version"] == 2
+    wm.get_applied_mcp_config_version.assert_called_once_with(ws["workspace_id"])
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_sandbox_warming(client):
+    """A workspace transitioning up (status 'starting') reports sandbox_warming
+    so the UI keeps polling and shows "Starting workspace…" rather than resting
+    on a stale stopped state."""
+    ws = _ws(status="starting")
+    base = _agent_config([_builtin()])
+    resolved = ResolvedMCP(
+        servers=[_builtin()],
+        builtin_names=frozenset({"builtin_search"}),
+        user_names=frozenset(),
+        version=1,
+    )
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.resolve_mcp_config", new=AsyncMock(return_value=resolved)),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.get_tool_schemas", new=AsyncMock(return_value=[])),
+    ):
+        resp = await client.get(f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sandbox_running"] is False
+    assert body["sandbox_warming"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_reuses_cached_schema_across_unrelated_mutation(client):
+    """Regression: toggling/adding ANY server bumps the workspace
+    config_version, but a snapshot cached under the server's own per-server
+    fingerprint stays valid — the unrelated server reads 'connected', not a
+    needless re-verify. (The bug: the cache used to be keyed by config_version,
+    so any mutation orphaned every server's snapshot.)"""
+    ws = _ws()
+    base = _agent_config([])
+    user_srv = _user_server()
+    resolved = ResolvedMCP(
+        servers=[user_srv], builtin_names=frozenset(),
+        user_names=frozenset({"remote_server"}),
+        version=99,  # the version has long since moved on from when it was cached
+    )
+    schema_rows = [{
+        "server_name": "remote_server", "status": "ok",
+        "tools": [{"name": "search", "description": "d", "input_schema": {}}],
+        "error": "", "config_hash": mcp_discovery_fingerprint(user_srv),
+        "discovered_at": NOW.isoformat(),
+    }]
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.resolve_mcp_config", new=AsyncMock(return_value=resolved)),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.get_tool_schemas", new=AsyncMock(return_value=schema_rows)),
+    ):
+        resp = await client.get(f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers")
+
+    assert resp.status_code == 200
+    srv = {s["name"]: s for s in resp.json()["servers"]}["remote_server"]
+    assert srv["status"] == "connected"
+    assert srv["tool_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_reverifies_when_server_own_config_changed(client):
+    """A cached snapshot whose fingerprint no longer matches the server's
+    current config (its OWN definition changed) is treated as pending so only
+    THAT server re-verifies — not the whole workspace."""
+    ws = _ws()
+    base = _agent_config([])
+    user_srv = _user_server()
+    resolved = ResolvedMCP(
+        servers=[user_srv], builtin_names=frozenset(),
+        user_names=frozenset({"remote_server"}), version=3,
+    )
+    schema_rows = [{
+        "server_name": "remote_server", "status": "ok",
+        "tools": [{"name": "search", "description": "d", "input_schema": {}}],
+        "error": "", "config_hash": "fingerprint-of-an-older-config",
+        "discovered_at": NOW.isoformat(),
+    }]
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.resolve_mcp_config", new=AsyncMock(return_value=resolved)),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.get_tool_schemas", new=AsyncMock(return_value=schema_rows)),
+    ):
+        resp = await client.get(f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers")
+
+    assert resp.status_code == 200
+    srv = {s["name"]: s for s in resp.json()["servers"]}["remote_server"]
+    assert srv["status"] == "pending"
+    assert srv["tool_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -193,6 +330,39 @@ async def test_list_keeps_disabled_builtin_visible(client):
     assert row["status"] == "disabled"
     assert row["editable"] is False and row["deletable"] is False
     assert row["tool_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_keeps_disabled_workspace_server_visible(client):
+    # A disabled workspace server is dropped from the effective set but must
+    # still render (greyed, with its toggle) so it can be re-enabled.
+    ws = _ws()
+    base = _agent_config([_builtin()])
+    disabled_srv = _user_server(name="disabled_remote")
+    resolved = ResolvedMCP(
+        servers=[_builtin()],
+        builtin_names=frozenset({"builtin_search"}),
+        user_names=frozenset(),
+        version=5,
+        disabled_workspace_servers=[disabled_srv],
+    )
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.resolve_mcp_config", new=AsyncMock(return_value=resolved)),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.get_tool_schemas", new=AsyncMock(return_value=[])),
+    ):
+        resp = await client.get(f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers")
+
+    assert resp.status_code == 200
+    by_name = {s["name"]: s for s in resp.json()["servers"]}
+    row = by_name["disabled_remote"]
+    assert row["origin"] == "workspace"
+    assert row["enabled"] is False
+    assert row["status"] == "disabled"
+    # Still fully manageable: re-enable toggle, edit, delete, promote.
+    assert row["editable"] is True and row["deletable"] is True
 
 
 @pytest.mark.asyncio
@@ -246,9 +416,8 @@ async def test_add_server_409_when_over_cap(client):
     with (
         patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
         patch("src.server.app.setup.agent_config", base),
-        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[])),
         patch(
-            "src.server.app.mcp_servers.upsert_workspace_server",
+            "src.server.app.mcp_servers.insert_workspace_server",
             new=AsyncMock(side_effect=ValueError("Maximum of 20 MCP servers per workspace reached")),
         ),
     ):
@@ -261,6 +430,26 @@ async def test_add_server_409_when_over_cap(client):
 
 
 @pytest.mark.asyncio
+async def test_add_server_409_when_name_exists(client):
+    # A concurrent create losing the ON CONFLICT DO NOTHING race surfaces as
+    # insert_workspace_server returning None — must be a 409, never a silent 201.
+    ws = _ws()
+    base = _agent_config([])
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=AsyncMock(return_value=None)) as ins,
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers",
+            json={"name": "dupe_server", "transport": "stdio", "command": "npx"},
+        )
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["detail"]
+    assert ins.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_add_server_happy(client):
     ws = _ws()
     base = _agent_config([])
@@ -268,18 +457,38 @@ async def test_add_server_happy(client):
     with (
         patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
         patch("src.server.app.setup.agent_config", base),
-        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[])),
-        patch("src.server.app.mcp_servers.upsert_workspace_server", new=AsyncMock(return_value=row)) as up,
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=AsyncMock(return_value=row)) as ins,
     ):
         resp = await client.post(
             f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers",
             json={"name": "new_server", "transport": "stdio", "command": "npx", "args": ["-y", "pkg"]},
         )
     assert resp.status_code == 201
-    assert up.await_count == 1
-    # source forced to 'workspace', enabled True
-    _, kwargs = up.await_args
-    assert kwargs["source"] == "workspace" and kwargs["enabled"] is True
+    assert ins.await_count == 1
+    args, kwargs = ins.await_args
+    assert args[0] == ws["workspace_id"] and args[1] == "new_server"
+    assert "config" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_mutation_schedules_proactive_apply(client):
+    """A successful add front-loads applying the new config to the running
+    session (live before the next turn), not only on the next message."""
+    ws = _ws()
+    base = _agent_config([])
+    row = {"name": "new_server", "source": "workspace", "enabled": True}
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=AsyncMock(return_value=row)),
+        patch("src.server.app.mcp_servers._schedule_proactive_apply") as sched,
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers",
+            json={"name": "new_server", "transport": "stdio", "command": "npx", "args": ["-y", "pkg"]},
+        )
+    assert resp.status_code == 201
+    sched.assert_called_once_with(ws["workspace_id"], USER)
 
 
 @pytest.mark.asyncio
@@ -317,17 +526,41 @@ async def test_add_from_template_copies_and_revalidates(client):
         patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
         patch("src.server.app.setup.agent_config", base),
         patch("src.server.app.mcp_servers.get_catalog_server", new=AsyncMock(return_value=template)),
-        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[])),
-        patch("src.server.app.mcp_servers.upsert_workspace_server", new=AsyncMock(return_value=row)) as up,
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=AsyncMock(return_value=row)) as ins,
     ):
         resp = await client.post(
             f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers",
             json={"from_template": "tmpl_server"},
         )
     assert resp.status_code == 201
-    _, kwargs = up.await_args
+    _, kwargs = ins.await_args
     assert kwargs["config"]["url"] == "https://api.example.com/mcp"
     assert kwargs["config"]["headers"] == {"Authorization": "${vault:API_KEY}"}
+
+
+@pytest.mark.asyncio
+async def test_add_from_template_revalidation_422_string_detail(client):
+    ws = _ws()
+    base = _agent_config([])
+    # A stored template that no longer passes the (tightened) URL policy.
+    template = {
+        "name": "tmpl_server", "transport": "http",
+        "url": "https://100.64.0.1/mcp", "command": None, "args": [],
+        "env": {}, "headers": {}, "description": "", "instruction": "",
+        "tool_exposure_mode": "summary",
+    }
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_catalog_server", new=AsyncMock(return_value=template)),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers",
+            json={"from_template": "tmpl_server"},
+        )
+    assert resp.status_code == 422
+    # Template re-validation 422 detail is a flat string, like the direct path.
+    assert isinstance(resp.json()["detail"], str)
 
 
 @pytest.mark.asyncio
@@ -344,6 +577,356 @@ async def test_add_from_missing_template_404(client):
             json={"from_template": "nope"},
         )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST import — standard mcpServers blob → create + auto-extract secrets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_import_creates_and_extracts_secret(client):
+    ws = _ws()
+    base = _agent_config([_builtin("builtin_search")])
+    insert = AsyncMock(
+        side_effect=lambda w, name, config=None: {
+            "name": name, "source": "workspace", "enabled": True,
+        }
+    )
+    create_secret = AsyncMock()
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_workspace_servers_and_version", new=AsyncMock(return_value=([], 8))),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.create_secret_db", new=create_secret),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=insert),
+        patch("src.server.app.mcp_servers._push_vault_to_sandbox", new=AsyncMock()) as push,
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={
+                "mcpServers": {
+                    "my-stock-mcp": {
+                        "type": "streamablehttp",
+                        "url": "https://api.example.com/ds/stock",
+                        "headers": {"Authorization": "EXAMPLE-OPAQUE-TOKEN-1234567890"},
+                    }
+                }
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["created"] == 1
+    row = body["results"][0]
+    assert row["status"] == "created"
+    assert row["name"] == "my_stock_mcp" and row["renamed"] is True
+    # The literal Authorization token was vaulted, not stored inline.
+    assert body["secrets_created"] == ["MY_STOCK_MCP_AUTHORIZATION"]
+    create_secret.assert_awaited_once()
+    sec_args, _ = create_secret.await_args
+    assert sec_args[1] == "MY_STOCK_MCP_AUTHORIZATION"
+    assert sec_args[2] == "EXAMPLE-OPAQUE-TOKEN-1234567890"
+    # The inserted config references the vault, never the raw token.
+    _, ins_kwargs = insert.await_args
+    assert ins_kwargs["config"]["headers"] == {
+        "Authorization": "${vault:MY_STOCK_MCP_AUTHORIZATION}"
+    }
+    # An authenticated remote server is set to use its secret during discovery,
+    # otherwise tools/list returns 401.
+    assert ins_kwargs["config"]["discovery_uses_secrets"] is True
+    assert "EXAMPLE-OPAQUE-TOKEN-1234567890" not in resp.text
+    push.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_import_dedupes_identical_token_across_servers(client):
+    ws = _ws()
+    base = _agent_config([])
+    create_secret = AsyncMock()
+    insert = AsyncMock(
+        side_effect=lambda w, name, config=None: {
+            "name": name, "source": "workspace", "enabled": True,
+        }
+    )
+    token = "SHARED-OPAQUE-TOKEN-ABCDEFGHIJ"
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_workspace_servers_and_version", new=AsyncMock(return_value=([], 9))),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.create_secret_db", new=create_secret),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=insert),
+        patch("src.server.app.mcp_servers._push_vault_to_sandbox", new=AsyncMock()),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={
+                "mcpServers": {
+                    "srv_one": {"type": "http", "url": "https://api.example.com/a", "headers": {"Authorization": token}},
+                    "srv_two": {"type": "http", "url": "https://api.example.com/b", "headers": {"Authorization": token}},
+                }
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["created"] == 2
+    # The identical token is stored exactly once; both servers reference it.
+    assert create_secret.await_count == 1
+    assert len(body["secrets_created"]) == 1
+    ref = f"${{vault:{body['secrets_created'][0]}}}"
+    for call in insert.await_args_list:
+        assert call.kwargs["config"]["headers"] == {"Authorization": ref}
+
+
+@pytest.mark.asyncio
+async def test_import_skips_builtin_and_existing(client):
+    ws = _ws()
+    base = _agent_config([_builtin("builtin_search")])
+    existing = [{"name": "already_here", "source": "workspace", "enabled": True, "config": {}}]
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_workspace_servers_and_version", new=AsyncMock(return_value=(existing, 9))),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=AsyncMock()) as ins,
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={
+                "mcpServers": {
+                    "builtin_search": {"command": "npx"},
+                    "already_here": {"command": "uvx"},
+                }
+            },
+        )
+    assert resp.status_code == 200
+    by_name = {r["name"]: r for r in resp.json()["results"]}
+    assert by_name["builtin_search"]["status"] == "skipped"
+    assert by_name["already_here"]["status"] == "exists"
+    # Neither pre-existing/collision row should reach the DB insert.
+    assert ins.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_import_reports_invalid_server_without_aborting(client):
+    ws = _ws()
+    base = _agent_config([])
+    insert = AsyncMock(
+        side_effect=lambda w, name, config=None: {
+            "name": name, "source": "workspace", "enabled": True,
+        }
+    )
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_workspace_servers_and_version", new=AsyncMock(return_value=([], 9))),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.create_secret_db", new=AsyncMock()),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=insert),
+        patch("src.server.app.mcp_servers._push_vault_to_sandbox", new=AsyncMock()),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={
+                "mcpServers": {
+                    # Private-IP URL → rejected by the URL policy after parse.
+                    "bad_one": {"type": "http", "url": "https://10.0.0.5/mcp"},
+                    "good_one": {"command": "npx", "args": ["-y", "pkg"]},
+                }
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    by_name = {r["name"]: r for r in body["results"]}
+    assert by_name["bad_one"]["status"] == "invalid"
+    assert by_name["good_one"]["status"] == "created"
+    assert body["created"] == 1
+
+
+@pytest.mark.asyncio
+async def test_import_empty_payload_422(client):
+    ws = _ws()
+    base = _agent_config([])
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={"mcpServers": {}},
+        )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST promote — workspace server UP into the user template catalog
+# ---------------------------------------------------------------------------
+
+
+def _promotable_row(name="remote_server", source="workspace", **config_over):
+    """A workspace MCP row (source='workspace') with a full config blob."""
+    config = {
+        "name": name, "transport": "http",
+        "url": "https://api.example.com/mcp", "command": None, "args": [],
+        "env": {}, "headers": {"Authorization": "${vault:API_KEY}"},
+        "description": "d", "instruction": "i", "tool_exposure_mode": "summary",
+        "discovery_uses_secrets": True,
+    }
+    config.update(config_over)
+    return {"name": name, "source": source, "enabled": True, "config": config}
+
+
+def _catalog_row(name="remote_server", **kw):
+    """A user_mcp_servers row shaped for catalog_row_to_response()."""
+    base = {
+        "name": name, "transport": "http", "command": None, "args": [],
+        "url": "https://api.example.com/mcp", "env": {},
+        "headers": {"Authorization": "${vault:API_KEY}"},
+        "description": "d", "instruction": "i", "tool_exposure_mode": "summary",
+        "created_at": None, "updated_at": None,
+    }
+    base.update(kw)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_promote_creates_template(client):
+    ws = _ws()
+    base = _agent_config([])
+    create = AsyncMock(return_value=_catalog_row())
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[_promotable_row()])),
+        patch("src.server.app.mcp_servers.get_catalog_server", new=AsyncMock(return_value=None)),
+        patch("src.server.app.mcp_servers.create_catalog_server", new=create),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/remote_server/promote",
+            json={"overwrite": False},
+        )
+    assert resp.status_code == 201
+    body = resp.json()
+    # Only the vault ref name surfaces — the secret value never travels.
+    assert body["header_refs"] == ["API_KEY"]
+    assert body["transport"] == "http"
+    _, kwargs = create.await_args
+    assert kwargs["url"] == "https://api.example.com/mcp"
+    assert kwargs["headers"] == {"Authorization": "${vault:API_KEY}"}
+
+
+@pytest.mark.asyncio
+async def test_promote_409_when_template_exists_without_overwrite(client):
+    ws = _ws()
+    base = _agent_config([])
+    create = AsyncMock()
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[_promotable_row()])),
+        patch("src.server.app.mcp_servers.get_catalog_server", new=AsyncMock(return_value=_catalog_row())),
+        patch("src.server.app.mcp_servers.create_catalog_server", new=create),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/remote_server/promote",
+            json={"overwrite": False},
+        )
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["detail"]
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_promote_overwrite_updates_existing(client):
+    ws = _ws()
+    base = _agent_config([])
+    update = AsyncMock(return_value=_catalog_row(description="updated"))
+    create = AsyncMock()
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[_promotable_row()])),
+        patch("src.server.app.mcp_servers.update_catalog_server", new=update),
+        patch("src.server.app.mcp_servers.create_catalog_server", new=create),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/remote_server/promote",
+            json={"overwrite": True},
+        )
+    assert resp.status_code == 201
+    update.assert_awaited_once()
+    # Overwrite path never falls through to create when a row was updated.
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_promote_404_when_server_absent(client):
+    ws = _ws()
+    base = _agent_config([])
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[])),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/nope/promote",
+            json={},
+        )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_promote_409_on_builtin(client):
+    ws = _ws()
+    base = _agent_config([_builtin("builtin_search")])
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/builtin_search/promote",
+            json={},
+        )
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_promote_404_for_disabled_builtin_marker(client):
+    # A (source='builtin', config=NULL) disable-marker row is not a definition.
+    ws = _ws()
+    base = _agent_config([])
+    marker = {"name": "remote_server", "source": "builtin", "enabled": False, "config": None}
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[marker])),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/remote_server/promote",
+            json={},
+        )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_promote_409_when_catalog_over_cap(client):
+    ws = _ws()
+    base = _agent_config([])
+    create = AsyncMock(side_effect=ValueError("Maximum of 50 MCP catalog servers per user reached"))
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.list_workspace_servers", new=AsyncMock(return_value=[_promotable_row()])),
+        patch("src.server.app.mcp_servers.get_catalog_server", new=AsyncMock(return_value=None)),
+        patch("src.server.app.mcp_servers.create_catalog_server", new=create),
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/remote_server/promote",
+            json={},
+        )
+    assert resp.status_code == 409
+    assert "Maximum of 50" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +1093,8 @@ async def test_discover_debounce_returns_cached(client):
     )
     fresh = {
         "server_name": "remote_server", "status": "ok", "tools": [], "error": "",
-        "config_version": 3, "discovered_at": datetime.now(timezone.utc).isoformat(),
+        "config_hash": mcp_discovery_fingerprint(user_srv),
+        "discovered_at": datetime.now(timezone.utc).isoformat(),
     }
     discover = AsyncMock()
     with (
@@ -524,7 +1108,8 @@ async def test_discover_debounce_returns_cached(client):
             f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/remote_server/discover"
         )
     assert resp.status_code == 200
-    assert resp.json()["server"]["status"] == "ok"
+    # Cache 'ok' is surfaced as 'connected' (same enum as the effective list).
+    assert resp.json()["server"]["status"] == "connected"
     assert discover.await_count == 0  # debounced — no re-run
 
 
@@ -539,12 +1124,12 @@ async def test_discover_runs_when_stale_and_stopped_yields_pending(client):
     )
     stale = {
         "server_name": "remote_server", "status": "ok", "tools": [], "error": "",
-        "config_version": 3,
+        "config_hash": mcp_discovery_fingerprint(user_srv),
         "discovered_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
     }
     pending_row = {
         "server_name": "remote_server", "status": "pending", "tools": [], "error": "",
-        "config_version": 3, "discovered_at": NOW.isoformat(),
+        "config_hash": mcp_discovery_fingerprint(user_srv), "discovered_at": NOW.isoformat(),
     }
     discover = AsyncMock(return_value=[pending_row])
     with (

@@ -4,7 +4,8 @@ Covers built-in disable, user add, deterministic ordering, builtin-collision
 skip, the zero-rows short-circuit (returns the SAME built-in objects), and the
 converter round-trip (vault_blueprints stripped, source forced to "workspace").
 
-The DB surface (list_workspace_servers, get_workspace) is fully mocked.
+The DB surface (the single snapshot-consistent get_workspace_servers_and_version
+helper) is fully mocked.
 """
 
 from types import SimpleNamespace
@@ -30,24 +31,16 @@ def _ws_row(name, source="workspace", enabled=True, config=None):
     return {"name": name, "source": source, "enabled": enabled, "config": config}
 
 
-def _patch_db_targets(rows, version):
-    """Patch the resolver's two lazily-imported DB reads."""
-    ws = {"mcp_config_version": version}
-    return [
-        patch(
-            "src.server.database.mcp_servers.list_workspace_servers",
-            new=AsyncMock(return_value=rows),
-        ),
-        patch(
-            "src.server.database.workspace.get_workspace",
-            new=AsyncMock(return_value=ws),
-        ),
-    ]
+def _patch_db_target(rows, version):
+    """Patch the resolver's single snapshot-consistent DB read."""
+    return patch(
+        "src.server.database.mcp_servers.get_workspace_servers_and_version",
+        new=AsyncMock(return_value=(rows, version)),
+    )
 
 
 async def _resolve(base, rows, version=0):
-    p1, p2 = _patch_db_targets(rows, version)
-    with p1, p2:
+    with _patch_db_target(rows, version):
         return await resolve_mcp_config(base, "user-1", "ws-1")
 
 
@@ -83,6 +76,7 @@ class TestConverter:
                 "description": "A server",
                 "instruction": "Use for X",
                 "tool_exposure_mode": "detailed",
+                "discovery_uses_secrets": True,
             },
         )
         cfg = workspace_row_to_server_config(row)
@@ -90,6 +84,12 @@ class TestConverter:
         assert cfg.args == ["-y", "acme-mcp"]
         assert cfg.env == {"KEY": "${vault:ACME_KEY}"}
         assert cfg.tool_exposure_mode == "detailed"
+        assert cfg.discovery_uses_secrets is True
+
+    def test_round_trip_defaults_discovery_uses_secrets_off(self):
+        # A row whose config omits the flag (legacy rows) defaults to secret-less.
+        row = _ws_row("acme", config={"transport": "stdio", "command": "npx"})
+        assert workspace_row_to_server_config(row).discovery_uses_secrets is False
 
     def test_row_name_overrides_config_name(self):
         row = _ws_row("authoritative", config={"name": "stale", "transport": "stdio"})
@@ -177,6 +177,36 @@ class TestResolveMergePrecedence:
 
         assert [s.name for s in resolved.servers] == ["alpha"]
         assert resolved.user_names == frozenset()
+
+    async def test_disabled_user_row_carried_for_reenable(self):
+        # Disabled workspace servers stay out of the effective set but are
+        # carried so the API can keep a re-enable toggle in the UI.
+        base = _base_config(MCPServerConfig(name="alpha"))
+        rows = [
+            _ws_row("zeta", enabled=False, config={"transport": "stdio", "command": "npx"}),
+            _ws_row("yankee", config={"transport": "stdio", "command": "npx"}),
+        ]
+
+        resolved = await _resolve(base, rows)
+
+        # 'zeta' runs nowhere, but is available to re-enable.
+        assert [s.name for s in resolved.servers] == ["alpha", "yankee"]
+        assert resolved.user_names == frozenset({"yankee"})
+        disabled = [s.name for s in resolved.disabled_workspace_servers]
+        assert disabled == ["zeta"]
+        assert resolved.disabled_workspace_servers[0].source == "workspace"
+
+    async def test_disabled_workspace_servers_sorted_and_empty_when_none(self):
+        base = _base_config(MCPServerConfig(name="alpha"))
+        # No disabled rows ⇒ empty list (default_factory, not a shared default).
+        assert (await _resolve(base, rows=[])).disabled_workspace_servers == []
+        rows = [
+            _ws_row("zulu", enabled=False, config={"transport": "stdio"}),
+            _ws_row("yankee", enabled=False, config={"transport": "stdio"}),
+        ]
+        resolved = await _resolve(base, rows)
+        assert [s.name for s in resolved.disabled_workspace_servers] == ["yankee", "zulu"]
+        assert [s.name for s in resolved.servers] == ["alpha"]  # only the built-in runs
 
     async def test_workspace_server_colliding_with_builtin_is_skipped(self):
         base = _base_config(MCPServerConfig(name="alpha"))
