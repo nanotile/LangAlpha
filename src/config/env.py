@@ -14,7 +14,7 @@ HOST_MODE: str = os.getenv("HOST_MODE", "oss")
 SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
 LOCAL_DEV_USER_ID: str = os.getenv("AUTH_USER_ID", "local-dev-user")
 
-# Quota enforcement service (ginlix-auth)
+# Quota / auth enforcement service URL
 AUTH_SERVICE_URL: str = os.getenv("AUTH_SERVICE_URL", "")
 
 # Minimum platform access tier required to customize the web-search provider.

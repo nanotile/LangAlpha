@@ -234,6 +234,11 @@ class AgentConfig(BaseModel):
     # Search API provider (tavily, bocha, serper)
     search_api: str = "tavily"
 
+    # Search depth level name from the provider's manifest entry
+    # (src/tools/manifest/search_providers.json). Unknown levels fall back to
+    # the provider's default_depth.
+    search_depth: str = "standard"
+
     # Background task configuration
     # If True, wait for background tasks to complete before returning to CLI
     # If False (default), return immediately and show status of running tasks

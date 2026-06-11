@@ -176,7 +176,7 @@ async def get_current_user(
 
     # Populate platform membership: access tier + plan display name.
     # Both fields share a single Redis cache entry (5 min TTL) so this never
-    # costs more than one ginlix-auth round-trip per user per 5 minutes.
+    # costs more than one platform-service round-trip per user per 5 minutes.
     from src.server.dependencies.usage_limits import (
         _fetch_platform_membership,
         platform_membership_cache_key,
@@ -428,17 +428,39 @@ async def update_preferences(
                 cp_for_validation = (existing or {}).get("other_preference", {}).get("custom_providers") or []
             _validate_custom_models(custom_models, cp_for_validation)
 
-    # Validate search_provider if present (None = key deletion, allowed)
-    if other_pref and other_pref.get("search_provider") is not None:
-        from src.config.tools import SearchEngine
+    # Validate search_provider / search_depth if present (None = key deletion,
+    # allowed). Shape validation only — tier gating happens at resolve time.
+    if other_pref and (
+        other_pref.get("search_provider") is not None
+        or other_pref.get("search_depth") is not None
+    ):
+        from src.tools.search_manifest import get_search_providers
 
-        valid_engines = {e.value for e in SearchEngine}
-        sp = other_pref["search_provider"]
-        if not isinstance(sp, str) or sp not in valid_engines:
+        providers = get_search_providers()
+
+        sp = other_pref.get("search_provider")
+        if sp is not None and (not isinstance(sp, str) or sp not in providers):
             raise HTTPException(
                 status_code=400,
-                detail=f"search_provider must be one of {sorted(valid_engines)}",
+                detail=f"search_provider must be one of {sorted(providers)}",
             )
+
+        sd = other_pref.get("search_depth")
+        if sd is not None:
+            # Depth names are provider-scoped: validate against the provider
+            # in this payload, or any provider when none is being set (the
+            # effective provider isn't known at write time).
+            if isinstance(sp, str) and sp in providers:
+                valid_depths = {d.name for d in providers[sp].depths}
+            else:
+                valid_depths = {
+                    d.name for spec in providers.values() for d in spec.depths
+                }
+            if not isinstance(sd, str) or sd not in valid_depths:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"search_depth must be one of {sorted(valid_depths)}",
+                )
 
     preferences = await upsert_user_preferences(
         user_id=user_id,

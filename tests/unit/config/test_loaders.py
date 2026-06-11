@@ -346,6 +346,16 @@ class TestLoadFromDictCompaction:
         config = load_from_dict(data)
         assert config.search_api == "serper"
 
+    def test_default_search_depth(self):
+        config = load_from_dict(_full_config_dict())
+        assert config.search_depth == "standard"
+
+    def test_custom_search_depth(self):
+        """Operators restore pre-branch behavior via search_depth in agent_config.yaml."""
+        data = _full_config_dict(search_depth="deep")
+        config = load_from_dict(data)
+        assert config.search_depth == "deep"
+
 
 # ---------------------------------------------------------------------------
 # load_from_files — config search

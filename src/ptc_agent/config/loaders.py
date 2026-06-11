@@ -333,8 +333,9 @@ def load_from_dict(
     compaction_data = config_data.get("compaction") or {}
     compaction_config = CompactionConfig(**compaction_data) if compaction_data else CompactionConfig()
 
-    # Search API provider
+    # Search API provider + default depth level
     search_api = config_data.get("search_api", "tavily")
+    search_depth = config_data.get("search_depth", "standard")
 
     # Create config object
     config = AgentConfig(
@@ -350,6 +351,7 @@ def load_from_dict(
         subagents=subagents_config,
         compaction=compaction_config,
         search_api=search_api,
+        search_depth=search_depth,
         background_auto_wait=background_auto_wait,
     )
 

@@ -808,12 +808,35 @@ async def list_models():
     """
     from src.llms.llm import get_configured_llm_models, LLM
     from src.server.app import setup
+    from src.tools.search_manifest import (
+        get_search_providers,
+        resolve_depth_tier,
+        resolve_provider_tier,
+    )
 
     models = get_configured_llm_models()
     config = LLM.get_model_config()
     from ptc_agent.config.agent import COMPACTION_PROFILES
 
     llm_cfg = setup.agent_config.llm if setup.agent_config and setup.agent_config.llm else None
+    # Tiers are pre-resolved (env floor folded in) so clients never need to
+    # know about SEARCH_PROVIDER_MIN_TIER; native_params stay server-side.
+    search_providers = {
+        name: {
+            "display_name": spec.display_name,
+            "min_tier": resolve_provider_tier(spec),
+            "default_depth": spec.default_depth,
+            "depths": [
+                {
+                    "name": d.name,
+                    "display_name": d.display_name,
+                    "min_tier": resolve_depth_tier(d),
+                }
+                for d in spec.depths
+            ],
+        }
+        for name, spec in get_search_providers().items()
+    }
     return {
         "models": {
             provider: {
@@ -834,5 +857,6 @@ async def list_models():
             "fallback_models": (llm_cfg.fallback or []) if llm_cfg else [],
         },
         "compaction_profiles": COMPACTION_PROFILES,
+        "search_providers": search_providers,
         "provider_catalog": _build_provider_catalog(),
     }

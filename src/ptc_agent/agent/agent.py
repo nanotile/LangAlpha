@@ -462,6 +462,7 @@ class PTCAgent:
             time_range=None,
             verbose=False,
             provider=self.config.search_api,
+            depth=self.config.search_depth,
         )
         tools.append(web_search_tool)
         tools.append(web_fetch_tool)
