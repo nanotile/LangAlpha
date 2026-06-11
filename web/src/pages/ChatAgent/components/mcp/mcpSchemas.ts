@@ -136,8 +136,48 @@ export function validateRemoteUrl(raw: string): string | null {
   return null;
 }
 
+/**
+ * Canonicalize a non-canonical numeric IPv4 host (decimal/hex/octal integer or
+ * short-dotted form) to dotted-quad, mirroring the C `inet_aton` the sandbox
+ * resolver uses — e.g. "2130706433", "0x7f000001", "0177.0.0.1", "127.1" all →
+ * "127.0.0.1". Returns null for anything that isn't a pure numeric IPv4 form
+ * (real hostnames, IPv6, malformed input), which then falls through unchanged.
+ */
+function inetAtonToV4(host: string): string | null {
+  if (!/^[0-9a-fA-FxX.]+$/.test(host)) return null;
+  const parts = host.split('.');
+  if (parts.length === 0 || parts.length > 4) return null;
+  const nums: number[] = [];
+  for (const p of parts) {
+    let n: number;
+    if (/^0[xX][0-9a-fA-F]+$/.test(p)) n = parseInt(p, 16);
+    else if (/^0[0-7]+$/.test(p)) n = parseInt(p, 8);
+    else if (/^[0-9]+$/.test(p)) n = parseInt(p, 10);
+    else return null;
+    if (!Number.isFinite(n) || n < 0) return null;
+    nums.push(n);
+  }
+  const n = nums.length;
+  let value: number;
+  if (n === 1) {
+    value = nums[0];
+  } else {
+    // Leading parts are single octets; the final part fills the remaining bytes.
+    for (let i = 0; i < n - 1; i++) if (nums[i] > 255) return null;
+    if (nums[n - 1] > Math.pow(256, 4 - (n - 1)) - 1) return null;
+    value = nums[n - 1];
+    for (let i = n - 2; i >= 0; i--) value += nums[i] * Math.pow(256, 3 - i);
+  }
+  if (value < 0 || value > 0xffffffff) return null;
+  return [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join('.');
+}
+
 /** Block loopback / private / link-local / metadata / reserved literal IPs. */
 function isDisallowedIp(host: string): boolean {
+  // Canonicalize non-canonical numeric forms (integer/hex/octal/short-dotted)
+  // the resolver would accept, so e.g. 2130706433 / 0x7f000001 can't slip past.
+  const canon = inetAtonToV4(host);
+  if (canon) host = canon;
   // IPv4 dotted-quad
   const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
