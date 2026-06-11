@@ -30,9 +30,10 @@ RUN apt-get update \
         curl ripgrep jq git unzip \
         libreoffice gcc poppler-utils pandoc qpdf \
         fonts-noto-cjk \
-    # -- uv (Python package manager) --
+    # -- uv (Python package manager) — relocate BOTH uv and uvx; the MCP
+    #    command allowlist permits `uvx`, so it must be on PATH too. --
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && mv /root/.local/bin/uv /usr/local/bin/uv \
+    && mv /root/.local/bin/uv /root/.local/bin/uvx /usr/local/bin/ \
     # -- Node.js (direct binary — avoids apt mirror flakiness) --
     && NODE_ARCH=$([ "$(dpkg --print-architecture)" = "arm64" ] && echo "arm64" || echo "x64") \
     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \

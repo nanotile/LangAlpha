@@ -444,6 +444,7 @@ class DaytonaProvider(SandboxProvider):
                 "nodejs",
                 "ripgrep",
                 "uv",
+                "uvx",
                 "jq",
                 "git",
                 "unzip",
@@ -489,7 +490,9 @@ class DaytonaProvider(SandboxProvider):
                 " libreoffice gcc poppler-utils pandoc qpdf"
                 " fonts-noto-cjk",
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",
-                "mv /root/.local/bin/uv /usr/local/bin/uv",
+                # Relocate BOTH uv and uvx — the MCP command allowlist permits
+                # `uvx`, so it must be on PATH too (mirrors Dockerfile.sandbox).
+                "mv /root/.local/bin/uv /root/.local/bin/uvx /usr/local/bin/",
                 # Node.js: pinned direct binary (matches Dockerfile.sandbox;
                 # avoids apt-mirror flakiness and unpinned-version drift).
                 "NODE_ARCH=$([ \"$(dpkg --print-architecture)\" = \"arm64\" ]"
