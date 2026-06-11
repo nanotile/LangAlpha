@@ -242,6 +242,10 @@ def format_infrastructure_usage(tool_usage: Dict[str, int]) -> Dict[str, Any]:
         }
     """
     services = {}
+    # Per service, the largest single key's count among type-carrying keys.
+    # Comparing against the accumulated total instead would let earlier
+    # depths' running sum outvote the actually-dominant depth.
+    typed_max: Dict[str, int] = {}
 
     for tool_name, count in tool_usage.items():
         if count <= 0:
@@ -254,11 +258,11 @@ def format_infrastructure_usage(tool_usage: Dict[str, int]) -> Dict[str, Any]:
         service_entry = {"count": count + prior.get("count", 0)}
 
         # Add metadata from pricing (the depth name for search providers).
-        # On the rare multi-depth collision, the larger count's type wins.
-        if "type" in prior and prior.get("count", 0) >= count:
-            service_entry["type"] = prior["type"]
-        elif "search_type" in pricing:
+        # On the rare multi-depth collision, the largest individual count's
+        # type wins regardless of iteration order.
+        if "search_type" in pricing and count > typed_max.get(service_name, 0):
             service_entry["type"] = pricing["search_type"]
+            typed_max[service_name] = count
         elif "type" in prior:
             service_entry["type"] = prior["type"]
 

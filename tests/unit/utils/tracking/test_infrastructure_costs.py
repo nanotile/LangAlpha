@@ -140,6 +140,21 @@ class TestFormatUsage:
         assert entry["count"] == 7
         assert entry["type"] == "fast"
 
+    def test_dominant_type_wins_when_not_last(self):
+        """The accumulated total of earlier depths must not outvote the
+        depth with the largest individual count (here: 1+2 >= 3 yet the
+        3-count depth's type must win)."""
+        formatted = format_infrastructure_usage(
+            {
+                "TavilySearchTool:ultra_fast": 1,
+                "TavilySearchTool:fast": 2,
+                "TavilySearchTool:standard": 3,
+            }
+        )
+        entry = formatted["services"]["tavily_search"]
+        assert entry["count"] == 6
+        assert entry["type"] == "standard"
+
     def test_auxiliary_tools_keep_type_field(self):
         """Research/image rows keep their pre-migration JSONB type values."""
         formatted = format_infrastructure_usage(
