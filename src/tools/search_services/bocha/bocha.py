@@ -19,7 +19,9 @@ class BochaAPI:
         Args:
             api_key: Optional API key. If not provided, reads from environment.
         """
-        self.api_key = api_key or os.getenv('BOCHA_API_KEY', 'sk-c4a28d458ff54b5f9ff1a467d4fe9314')
+        self.api_key = api_key or os.getenv('BOCHA_API_KEY')
+        if not self.api_key:
+            raise ValueError("BOCHA_API_KEY not found in environment variables")
         self.base_url = "https://api.bochaai.com/v1"
         self.ai_search_endpoint = f"{self.base_url}/ai-search"
         self.headers = {
