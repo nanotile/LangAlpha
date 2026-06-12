@@ -25,20 +25,20 @@ def _ws_row(name: str, config: dict) -> dict:
 
 @pytest.fixture
 def patched(monkeypatch):
-    purge = AsyncMock()
+    purge_bump = AsyncMock()
     bump = AsyncMock()
     sched = MagicMock()
-    monkeypatch.setattr(mcp_db, "delete_tool_schemas", purge)
+    monkeypatch.setattr(mcp_db, "delete_tool_schemas_and_bump", purge_bump)
     monkeypatch.setattr(mcp_db, "bump_workspace_mcp_version", bump)
     monkeypatch.setattr(mcp_servers_mod, "_schedule_proactive_apply", sched)
-    return purge, bump, sched
+    return purge_bump, bump, sched
 
 
 @pytest.mark.asyncio
 async def test_secret_change_purges_and_bumps_for_secret_using_server(
     monkeypatch, patched
 ):
-    purge, bump, sched = patched
+    purge_bump, bump, sched = patched
     rows = [
         # Remote server authenticating via the changed secret: its discovery
         # runs WITH secrets, so its cached tools/list may depend on the value.
@@ -60,8 +60,9 @@ async def test_secret_change_purges_and_bumps_for_secret_using_server(
 
     await _invalidate_mcp_for_secret("ws-1", "user-1", "API_KEY")
 
-    purge.assert_awaited_once_with("ws-1", "authy")
-    bump.assert_awaited_once_with("ws-1")
+    # Purge and version bump ride ONE atomic call; no separate bump.
+    purge_bump.assert_awaited_once_with("ws-1", ["authy"])
+    bump.assert_not_awaited()
     sched.assert_called_once_with("ws-1", "user-1")
 
 
@@ -70,7 +71,7 @@ async def test_stdio_env_ref_bumps_without_purge(monkeypatch, patched):
     """A stdio server's discovery runs secret-less, so its snapshot can't
     depend on the value — no purge, but the bump still re-resolves the live
     session (covers the needs_secret → ready transition)."""
-    purge, bump, sched = patched
+    purge_bump, bump, sched = patched
     rows = [
         _ws_row("plain", {
             "transport": "stdio",
@@ -84,14 +85,14 @@ async def test_stdio_env_ref_bumps_without_purge(monkeypatch, patched):
 
     await _invalidate_mcp_for_secret("ws-1", "user-1", "API_KEY")
 
-    purge.assert_not_awaited()
+    purge_bump.assert_not_awaited()
     bump.assert_awaited_once_with("ws-1")
     sched.assert_called_once_with("ws-1", "user-1")
 
 
 @pytest.mark.asyncio
 async def test_unreferenced_secret_is_a_noop(monkeypatch, patched):
-    purge, bump, sched = patched
+    purge_bump, bump, sched = patched
     rows = [
         _ws_row("authy", {
             "transport": "http",
@@ -105,7 +106,7 @@ async def test_unreferenced_secret_is_a_noop(monkeypatch, patched):
 
     await _invalidate_mcp_for_secret("ws-1", "user-1", "UNRELATED")
 
-    purge.assert_not_awaited()
+    purge_bump.assert_not_awaited()
     bump.assert_not_awaited()
     sched.assert_not_called()
 

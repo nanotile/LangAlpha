@@ -115,15 +115,22 @@ async def _invalidate_mcp_for_secret(
         if not referencing:
             return
 
+        purge: list[str] = []
         for row in referencing:
             try:
                 server = workspace_row_to_server_config(row)
             except Exception:
                 continue
             if discovery_should_use_secrets(server):
-                await mcp_db.delete_tool_schemas(workspace_id, row["name"])
+                purge.append(row["name"])
 
-        await mcp_db.bump_workspace_mcp_version(workspace_id)
+        # Purge + bump in ONE transaction: a partial purge with an un-bumped
+        # version would let live sessions skip re-resolution against the
+        # half-purged cache.
+        if purge:
+            await mcp_db.delete_tool_schemas_and_bump(workspace_id, purge)
+        else:
+            await mcp_db.bump_workspace_mcp_version(workspace_id)
 
         from src.server.app.mcp_servers import _schedule_proactive_apply
 

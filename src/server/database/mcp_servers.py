@@ -541,6 +541,28 @@ async def delete_tool_schemas(workspace_id: str, server_name: str) -> int:
             return cur.rowcount
 
 
+async def delete_tool_schemas_and_bump(
+    workspace_id: str, server_names: list[str]
+) -> int:
+    """Purge snapshots for the named servers AND bump mcp_config_version, atomically.
+
+    One transaction so a mid-purge failure can never leave schemas partially
+    deleted with the version un-bumped (live sessions would skip re-resolution
+    against the half-purged cache). Returns the deleted row count.
+    """
+    async with get_db_connection() as conn:
+        async with conn.transaction():
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM workspace_mcp_tool_schemas "
+                    "WHERE workspace_id = %s AND server_name = ANY(%s)",
+                    (workspace_id, server_names),
+                )
+                deleted = cur.rowcount
+                await _bump_version(cur, workspace_id)
+                return deleted
+
+
 async def bump_workspace_mcp_version(workspace_id: str) -> None:
     """Bump mcp_config_version outside a row mutation (own transaction).
 

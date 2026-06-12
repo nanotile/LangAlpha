@@ -332,7 +332,10 @@ except ImportError:
             for param_name, param_info in params.items():
                 param_desc = param_info.get("description", "")
                 escaped_desc = _escape(param_desc)
-                param_type = param_info["type"]
+                # The schema `type` field is untrusted text like the
+                # description — escape it (and coerce non-str values) so it
+                # can't terminate the docstring.
+                param_type = _escape(str(param_info["type"]))
                 required = " (required)" if param_info["required"] else ""
                 lines.append(
                     f"    {param_name} ({param_type}){required}: {escaped_desc}"
@@ -392,6 +395,9 @@ except ImportError:
             "null": "None",
         }
 
+        # A hostile schema may carry a non-str (unhashable) `type`.
+        if not isinstance(json_type, str):
+            return "Any"
         return type_map.get(json_type, "Any")
 
     def _generate_example_value(self, param_type: str) -> str:
@@ -412,6 +418,9 @@ except ImportError:
             "object": "{}",
         }
 
+        # A hostile schema may carry a non-str (unhashable) `type`.
+        if not isinstance(param_type, str):
+            return '""'
         return examples.get(param_type, '""')
 
     def _extract_return_info(self, description: str) -> tuple[str, str]:
@@ -516,9 +525,10 @@ except ImportError:
                 required_marker = (
                     "**Required**" if param_info["required"] else "Optional"
                 )
-                param_type = param_info["type"]
+                param_type = str(param_info["type"])
                 param_desc = param_info.get("description", "")
                 if source == "workspace":
+                    param_type = sanitize_tool_text(param_type)
                     param_desc = sanitize_tool_text(param_desc)
                 doc += f"- `{param_name}` ({param_type}) - {required_marker}\n"
                 if param_desc:
