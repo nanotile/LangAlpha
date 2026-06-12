@@ -235,3 +235,23 @@ def test_disabled_builtin_absent_from_summary():
     )
     summary = build_tool_summary_from_registry(composite, mode="summary")
     assert "market" not in summary
+
+
+def test_disabled_builtin_hidden_from_get_tool_info():
+    """get_tool_info returns None for a workspace-disabled built-in."""
+    reg = _make_builtin_registry()
+    composite = build_composite_registry(
+        reg, [], {}, disabled_builtin_names=frozenset({"market"})
+    )
+    assert composite.get_tool_info("market", "get_price") is None
+
+
+@pytest.mark.asyncio
+async def test_disabled_builtin_call_tool_raises():
+    """Host call_tool refuses a workspace-disabled built-in."""
+    reg = _make_builtin_registry()
+    composite = build_composite_registry(
+        reg, [], {}, disabled_builtin_names=frozenset({"market"})
+    )
+    with pytest.raises(RuntimeError, match="disabled for this workspace"):
+        await composite.call_tool("market", "get_price", {})

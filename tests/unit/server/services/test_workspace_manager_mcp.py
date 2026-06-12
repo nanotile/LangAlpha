@@ -504,3 +504,202 @@ class TestAppliedVersionAndProactiveApply:
         await wm.refresh_session_mcp("ws-x", "user-1")
 
         wm.proactively_apply_mcp_config.assert_awaited_once_with("ws-x", "user-1")
+
+
+# ---------------------------------------------------------------------------
+# Discovery kick must see the session already cached (recover/attach paths)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryKickSeesCachedSession:
+    """The background discovery task's liveness gate is
+    ``self._sessions.get(workspace_id) is session``; if the kick fires before
+    the session is cached, the task exits permanently. Both _recover_sandbox
+    and _attach_running_session must cache the session BEFORE the kick.
+    """
+
+    def setup_method(self):
+        WorkspaceManager.reset_instance()
+
+    def teardown_method(self):
+        WorkspaceManager.reset_instance()
+
+    @pytest.mark.asyncio
+    @patch("src.server.services.workspace_manager.update_workspace_status", new_callable=AsyncMock)
+    @patch("src.server.services.workspace_manager.update_workspace_activity", new_callable=AsyncMock)
+    @patch("src.server.services.workspace_manager.SessionManager")
+    async def test_recover_sandbox_caches_before_kick(
+        self, mock_session_mgr, mock_activity, mock_status
+    ):
+        """_recover_sandbox caches the session before _kick_mcp_discovery, so the
+        kick's liveness check (``_sessions.get(ws) is session``) passes."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        ws_id = str(uuid.uuid4())
+
+        session = _make_session(version=1, summary="s")
+        session.initialize = AsyncMock()
+        session.sandbox.sandbox_id = "sb-new"
+        mock_session_mgr.get_session.return_value = session
+
+        wm._mint_sandbox_tokens = AsyncMock(return_value={})
+        wm._apply_session_mcp = AsyncMock(return_value=_resolved(1, user_names=["alpha"]))
+        wm._servers_needing_discovery = MagicMock(return_value=[MagicMock(name="alpha")])
+        wm._sync_sandbox_assets = AsyncMock()
+        wm._restore_files = AsyncMock()
+
+        # Spy: record whether the session was already cached at kick time.
+        cached_at_kick = {"value": None}
+
+        def spy_kick(workspace_id, *a, **k):
+            cached_at_kick["value"] = wm._sessions.get(workspace_id) is session
+            # Don't actually schedule the background task.
+
+        wm._kick_mcp_discovery = spy_kick
+
+        await wm._recover_sandbox(ws_id, "user-1", MagicMock())
+
+        assert cached_at_kick["value"] is True
+        assert wm._sessions.get(ws_id) is session
+
+    @pytest.mark.asyncio
+    @patch("src.server.services.workspace_manager.SessionManager")
+    async def test_attach_running_session_caches_before_kick(self, mock_session_mgr):
+        """_attach_running_session caches the session before _kick_mcp_discovery
+        so the kick's liveness check passes on a cold init."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        ws_id = str(uuid.uuid4())
+
+        session = _make_session(version=1, summary="s")
+        session._initialized = False
+        session.initialize = AsyncMock()
+        mock_session_mgr.get_session.return_value = session
+
+        wm._apply_session_mcp = AsyncMock(return_value=_resolved(1, user_names=["alpha"]))
+        wm._servers_needing_discovery = MagicMock(return_value=[MagicMock(name="alpha")])
+        wm._sync_sandbox_assets = AsyncMock()
+        wm._maybe_migrate_sandbox = AsyncMock(return_value=None)
+
+        cached_at_kick = {"value": None}
+
+        def spy_kick(workspace_id, *a, **k):
+            cached_at_kick["value"] = wm._sessions.get(workspace_id) is session
+
+        wm._kick_mcp_discovery = spy_kick
+
+        workspace = _make_workspace(ws_id, status="running", mcp_config_version=1)
+        out_session, did_init = await wm._attach_running_session(
+            workspace, "user-1", None, lambda _stage: None
+        )
+
+        assert cached_at_kick["value"] is True
+        assert out_session is session
+        assert did_init is True
+        assert wm._sessions.get(ws_id) is session
+
+    @pytest.mark.asyncio
+    @patch("src.server.services.workspace_manager.update_workspace_status", new_callable=AsyncMock)
+    @patch("src.server.services.workspace_manager.update_workspace_activity", new_callable=AsyncMock)
+    @patch("src.server.services.workspace_manager.SessionManager")
+    async def test_recover_sandbox_unwinds_cache_on_post_kick_failure(
+        self, mock_session_mgr, mock_activity, mock_status
+    ):
+        """If a post-kick step raises, the broken session is not left cached —
+        preserving the old code's 'only cached on full success' semantics."""
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        ws_id = str(uuid.uuid4())
+
+        session = _make_session(version=1, summary="s")
+        session.initialize = AsyncMock()
+        session.sandbox.sandbox_id = "sb-new"
+        mock_session_mgr.get_session.return_value = session
+
+        wm._mint_sandbox_tokens = AsyncMock(return_value={})
+        wm._apply_session_mcp = AsyncMock(return_value=_resolved(1, user_names=["alpha"]))
+        wm._servers_needing_discovery = MagicMock(return_value=[MagicMock(name="alpha")])
+        wm._sync_sandbox_assets = AsyncMock()
+        wm._restore_files = AsyncMock()
+        wm._kick_mcp_discovery = MagicMock()
+        wm._cancel_mcp_discovery = MagicMock()
+        mock_status.side_effect = RuntimeError("status write failed")
+
+        with pytest.raises(RuntimeError, match="status write failed"):
+            await wm._recover_sandbox(ws_id, "user-1", MagicMock())
+
+        assert wm._sessions.get(ws_id) is None
+        wm._cancel_mcp_discovery.assert_called_once_with(ws_id)
+
+
+# ---------------------------------------------------------------------------
+# _clear_session cancels in-flight discovery (FIX B)
+# ---------------------------------------------------------------------------
+
+
+class TestClearSessionCancelsDiscovery:
+    def setup_method(self):
+        WorkspaceManager.reset_instance()
+
+    def teardown_method(self):
+        WorkspaceManager.reset_instance()
+
+    @pytest.mark.asyncio
+    @patch("src.server.services.workspace_manager.SessionManager")
+    async def test_clear_session_cancels_pending_discovery(self, mock_session_mgr):
+        """_clear_session cancels the workspace's in-flight discovery task so it
+        can't run against the torn-down session (mirrors stop/delete_workspace)."""
+        mock_session_mgr.cleanup_session = AsyncMock()
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        ws_id = str(uuid.uuid4())
+        session = _make_session(version=1, summary="s")
+        wm._sessions[ws_id] = session
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_discover(*a, **k):
+            started.set()
+            await release.wait()
+            return []
+
+        server = MagicMock()
+        server.name = "alpha"
+        with patch(
+            "src.server.services.mcp_discovery.discover_and_cache",
+            new=AsyncMock(side_effect=slow_discover),
+        ):
+            wm._kick_mcp_discovery(ws_id, "user-1", session, [server], 1)
+            await started.wait()
+            task = next(iter(wm._mcp_discovery_tasks_by_ws[ws_id]))
+
+            await wm._clear_session(ws_id)
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert task.cancelled()
+        assert ws_id not in wm._mcp_discovery_tasks_by_ws
+        assert ws_id not in wm._sessions
+
+    @pytest.mark.asyncio
+    @patch("src.server.services.workspace_manager.SessionManager")
+    async def test_clear_session_cancels_before_cleanup(self, mock_session_mgr):
+        """The cancel must run as the first step — before cleanup_session — so
+        discovery never races the teardown."""
+        order: list[str] = []
+
+        async def record_cleanup(_ws):
+            order.append("cleanup")
+
+        mock_session_mgr.cleanup_session = AsyncMock(side_effect=record_cleanup)
+        wm = WorkspaceManager.get_instance(config=_make_config())
+        ws_id = str(uuid.uuid4())
+
+        orig_cancel = wm._cancel_mcp_discovery
+
+        def record_cancel(workspace_id):
+            order.append("cancel")
+            return orig_cancel(workspace_id)
+
+        wm._cancel_mcp_discovery = record_cancel
+
+        await wm._clear_session(ws_id)
+
+        assert order == ["cancel", "cleanup"]

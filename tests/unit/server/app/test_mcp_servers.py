@@ -167,8 +167,12 @@ async def test_list_effective_servers_masks_and_decorates(client):
     # tool_exposure_mode is non-null: a config None coalesces to "summary".
     assert us["tool_exposure_mode"] == "summary"
     assert bi["tool_exposure_mode"] == "summary"
-    # Literal vault-ref string is never echoed as a raw header value.
-    assert "Authorization" not in resp.text
+    # The stored reference map is echoed for workspace servers so the edit
+    # form can round-trip it — values are ref strings, never resolved secrets.
+    assert us["headers"] == {"Authorization": "${vault:API_KEY}"}
+    assert us["env"] == {}
+    # Built-ins never echo maps.
+    assert bi["env"] == {} and bi["headers"] == {}
 
 
 @pytest.mark.asyncio

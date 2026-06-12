@@ -535,6 +535,8 @@ class TestDiscoverUserMcpSchemas:
         # the client temp file is cleaned up afterwards.
         first_discover = next(c for c in exec_cmds if " discover " in c)
         assert client_paths[0] in first_discover
+        # python3 explicitly: the no-snapshot image has no `python` alias.
+        assert " python3 " in first_discover
         assert any(
             c.startswith("rm -f") and client_paths[0] in c for c in exec_cmds
         )

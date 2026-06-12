@@ -233,7 +233,7 @@ class TestAgentConfigToCoreConfig:
         core.mcp.servers.append(
             MCPServerConfig(name="injected", source="workspace")
         )
-        assert [s.name for s in config.mcp.servers] != ["injected"]
+        assert config.mcp.servers == []
 
 
 # ---------------------------------------------------------------------------

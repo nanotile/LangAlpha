@@ -190,6 +190,24 @@ def test_env_key_rejected(key):
         McpServerInput(**_stdio(env={key: "literal"}))
 
 
+@pytest.mark.parametrize(
+    "arg",
+    ["--flag=${vault:TOKEN}", "${vault:TOKEN}", "--verbose", "package-name", "$100"],
+)
+def test_args_accept_vault_refs_and_literals(arg):
+    srv = McpServerInput(**_stdio(args=[arg]))
+    assert srv.args == [arg]
+
+
+@pytest.mark.parametrize(
+    "arg",
+    ["${HOME}", "$HOME", "--dir=${HOME}/x", "--x=${vault:bad name}", "--x=${vault:"],
+)
+def test_args_reject_host_env_and_malformed_vault(arg):
+    with pytest.raises(ValidationError):
+        McpServerInput(**_stdio(args=[arg]))
+
+
 # ---------------------------------------------------------------------------
 # Length caps
 # ---------------------------------------------------------------------------
