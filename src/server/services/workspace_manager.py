@@ -224,6 +224,10 @@ class WorkspaceManager:
 
         Safe to call when the workspace is not present — idempotent.
         """
+        # Cancel in-flight discovery before tearing down the session, mirroring
+        # stop_workspace/delete_workspace — it must not run against the torn-down
+        # sandbox or write orphaned schema rows for an evicted session.
+        self._cancel_mcp_discovery(workspace_id)
         try:
             await SessionManager.cleanup_session(workspace_id)
         except Exception as e:
@@ -695,24 +699,37 @@ class WorkspaceManager:
             workspace_id, user_id, session.sandbox, reusing_sandbox=False
         )
 
-        if resolved_mcp is not None:
-            self._kick_mcp_discovery(
-                workspace_id,
-                user_id,
-                session,
-                self._servers_needing_discovery(session, resolved_mcp),
-                session.mcp_config_version or 0,
-            )
-
-        if session.sandbox:
-            await self._restore_files(workspace_id, session.sandbox)
-
-        await update_workspace_status(
-            workspace_id=workspace_id,
-            status="running",
-            sandbox_id=new_sandbox_id,
-        )
+        # Cache the session BEFORE kicking discovery: the background task's
+        # liveness gate (``self._sessions.get(workspace_id) is session``) would
+        # otherwise see no cached session and exit permanently. Any later step
+        # that raises must NOT leave this broken session cached — the old code
+        # only cached after every step succeeded — so unwind on failure.
         self._sessions[workspace_id] = session
+
+        try:
+            if resolved_mcp is not None:
+                self._kick_mcp_discovery(
+                    workspace_id,
+                    user_id,
+                    session,
+                    self._servers_needing_discovery(session, resolved_mcp),
+                    session.mcp_config_version or 0,
+                )
+
+            if session.sandbox:
+                await self._restore_files(workspace_id, session.sandbox)
+
+            await update_workspace_status(
+                workspace_id=workspace_id,
+                status="running",
+                sandbox_id=new_sandbox_id,
+            )
+        except Exception:
+            self._cancel_mcp_discovery(workspace_id)
+            if self._sessions.get(workspace_id) is session:
+                self._sessions.pop(workspace_id, None)
+            raise
+
         self._record_sync(workspace_id)
         await update_workspace_activity(workspace_id)
         return session
@@ -1860,20 +1877,33 @@ class WorkspaceManager:
             )
             mark("cold_asset_sync")
 
-            if resolved_mcp is not None:
-                self._kick_mcp_discovery(
-                    workspace_id,
-                    workspace_user_id,
-                    session,
-                    self._servers_needing_discovery(session, resolved_mcp),
-                    session.mcp_config_version or 0,
-                )
+            # Cache the session BEFORE kicking discovery: the background task's
+            # liveness gate (``self._sessions.get(workspace_id) is session``)
+            # would otherwise see no cached session and exit permanently. If a
+            # later step raises, don't leave this broken session cached — the
+            # old code only cached after migration succeeded — so unwind.
+            self._sessions[workspace_id] = session
 
-            migrated = await self._maybe_migrate_sandbox(
-                workspace_id, workspace_user_id, session, workspace
-            )
-            if migrated is not None:
-                session = migrated
+            try:
+                if resolved_mcp is not None:
+                    self._kick_mcp_discovery(
+                        workspace_id,
+                        workspace_user_id,
+                        session,
+                        self._servers_needing_discovery(session, resolved_mcp),
+                        session.mcp_config_version or 0,
+                    )
+
+                migrated = await self._maybe_migrate_sandbox(
+                    workspace_id, workspace_user_id, session, workspace
+                )
+                if migrated is not None:
+                    session = migrated
+            except Exception:
+                self._cancel_mcp_discovery(workspace_id)
+                if self._sessions.get(workspace_id) is session:
+                    self._sessions.pop(workspace_id, None)
+                raise
             did_init = True
 
         self._sessions[workspace_id] = session

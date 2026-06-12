@@ -27,6 +27,10 @@ class Session:
         """
         self.conversation_id = conversation_id
         self.config = config
+        # Pristine server list snapshotted before the WorkspaceManager mutates
+        # ``config.mcp.servers`` to the resolved composite. Restored on stop() so
+        # a restart re-resolves from built-ins, not the prior resolution.
+        self._pristine_mcp_servers = list(config.mcp.servers)
         self.sandbox: PTCSandbox | None = None
         self.mcp_registry: MCPRegistry | None = None
         # The built-in registry this session connected/borrowed. ``mcp_registry``
@@ -309,6 +313,9 @@ class Session:
         self._owns_mcp_registry = False
         self.mcp_tool_summary = None
         self.mcp_config_version = None
+        # Restore the pristine server list so a restart re-enters PTCSandbox with
+        # the unresolved built-ins, not the stale per-workspace resolution.
+        self.config.mcp.servers = list(self._pristine_mcp_servers)
 
         logger.info("Session stopped", conversation_id=self.conversation_id)
 
