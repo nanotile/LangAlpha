@@ -58,6 +58,20 @@ describe('mcpSchemas — URL policy', () => {
   });
 
   it.each([
+    ['OData batch path', 'https://api.example.com/$batch'],
+    ['OData query options', "https://api.example.com/odata?$filter=status%20eq%20'active'&$top=100"],
+  ])('accepts bare $$word URL conventions — %s', (_label, url) => {
+    expect(validateRemoteUrl(url)).toBeNull();
+  });
+
+  it.each([
+    ['brace env placeholder', 'https://api.example.com/${VAR}/mcp'],
+    ['unclosed brace form', 'https://api.example.com/${vault:TOK'],
+  ])('rejects brace placeholder forms — %s', (_label, url) => {
+    expect(validateRemoteUrl(url)).not.toBeNull();
+  });
+
+  it.each([
     ['http scheme', 'http://example.com'],
     ['userinfo creds', 'https://user:pass@example.com'],
     ['localhost', 'https://localhost/mcp'],

@@ -778,6 +778,93 @@ async def test_import_dedupes_identical_token_across_servers(client):
 
 
 @pytest.mark.asyncio
+async def test_import_cap_mid_server_rolls_back_created_secrets(client):
+    """The vault cap firing on a server's SECOND secret must delete the first —
+    a failed server import never strands orphaned vault entries."""
+    ws = _ws()
+    base = _agent_config([])
+    create_secret = AsyncMock(
+        side_effect=[None, ValueError("vault secret cap (20) reached")]
+    )
+    delete_secret = AsyncMock()
+    insert = AsyncMock()
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_workspace_servers_and_version", new=AsyncMock(return_value=([], 9))),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.create_secret_db", new=create_secret),
+        patch("src.server.app.mcp_servers.delete_secret_db", new=delete_secret),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=insert),
+        patch("src.server.app.mcp_servers._push_vault_to_sandbox", new=AsyncMock()) as push,
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={
+                "mcpServers": {
+                    "capper": {
+                        "type": "http",
+                        "url": "https://api.example.com/mcp",
+                        "headers": {
+                            "Authorization": "OPAQUE-TOKEN-AAAAAAAAAA",
+                            "X-Api-Key": "OPAQUE-TOKEN-BBBBBBBBBB",
+                        },
+                    }
+                }
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["results"][0]["status"] == "error"
+    assert body["secrets_created"] == []
+    # The one secret that DID get created was rolled back; no server row, no push.
+    delete_secret.assert_awaited_once()
+    assert delete_secret.await_args.args[0] == ws["workspace_id"]
+    assert delete_secret.await_args.args[1] == "CAPPER_AUTHORIZATION"
+    insert.assert_not_awaited()
+    push.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_import_existing_server_rolls_back_extracted_secrets(client):
+    """A name that turns out to already exist (insert returns None) must not
+    keep the secrets vaulted for it during extraction."""
+    ws = _ws()
+    base = _agent_config([])
+    create_secret = AsyncMock()
+    delete_secret = AsyncMock()
+    with (
+        patch("src.server.app.mcp_servers.db_get_workspace", new=AsyncMock(return_value=ws)),
+        patch("src.server.app.setup.agent_config", base),
+        patch("src.server.app.mcp_servers.get_workspace_servers_and_version", new=AsyncMock(return_value=([], 9))),
+        patch("src.server.app.mcp_servers.get_workspace_secret_names", new=AsyncMock(return_value=set())),
+        patch("src.server.app.mcp_servers.create_secret_db", new=create_secret),
+        patch("src.server.app.mcp_servers.delete_secret_db", new=delete_secret),
+        patch("src.server.app.mcp_servers.insert_workspace_server", new=AsyncMock(return_value=None)),
+        patch("src.server.app.mcp_servers._push_vault_to_sandbox", new=AsyncMock()) as push,
+    ):
+        resp = await client.post(
+            f"/api/v1/workspaces/{ws['workspace_id']}/mcp/servers/import",
+            json={
+                "mcpServers": {
+                    "racer": {
+                        "type": "http",
+                        "url": "https://api.example.com/mcp",
+                        "headers": {"Authorization": "OPAQUE-TOKEN-CCCCCCCCCC"},
+                    }
+                }
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["results"][0]["status"] == "exists"
+    assert body["secrets_created"] == []
+    delete_secret.assert_awaited_once()
+    assert delete_secret.await_args.args[1] == "RACER_AUTHORIZATION"
+    push.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_import_skips_builtin_and_existing(client):
     ws = _ws()
     base = _agent_config([_builtin("builtin_search")])

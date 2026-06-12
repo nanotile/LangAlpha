@@ -6,6 +6,8 @@ detection, and untrusted-text neutralization for user MCP servers.
 
 import ast
 
+import pytest
+
 from ptc_agent.core.mcp_sanitize import (
     VAULT_REF_RE,
     discovery_should_use_secrets,
@@ -154,3 +156,24 @@ class TestSanitizeToolText:
     def test_empty_and_none(self):
         assert sanitize_tool_text("") == ""
         assert sanitize_tool_text(None) == ""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'desc \\" tail',  # pre-existing backslash-quote
+            "desc \\' tail",
+            'a\\"b"""c',  # backslash-quote AND a triple-quote run
+            "trailing backslash \\",
+            'plain "quoted" words',
+            "lone \\ backslash",
+        ],
+    )
+    def test_escaping_round_trips_content(self, text):
+        """Sanitized text embedded in a docstring must EVALUATE back to the
+        original content — the escapes are source-level only. The old escape
+        order silently un-doubled pre-existing ``\\"`` sequences, mutating the
+        evaluated text."""
+        cleaned = sanitize_tool_text(text)
+        module = f'def f():\n    """{cleaned}"""\n'
+        tree = ast.parse(module)
+        assert ast.get_docstring(tree.body[0], clean=False) == text

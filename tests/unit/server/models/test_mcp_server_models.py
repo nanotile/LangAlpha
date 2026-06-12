@@ -143,11 +143,27 @@ def test_url_accepts_public_https():
         "https://svc.internal/mcp",  # *.internal
         "https://svc.localhost/mcp",  # *.localhost
         "https://api.example.com/${vault:TOK}",  # secret in url
+        "https://api.example.com/${VAR}/mcp",  # brace env placeholder
+        "https://api.example.com/${vault:TOK",  # unclosed brace form
     ],
 )
 def test_url_policy_rejects(url):
     with pytest.raises(ValueError):
         validate_remote_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.example.com/$batch",  # OData batch endpoint
+        "https://api.example.com/odata?$filter=status%20eq%20'active'",
+        "https://api.example.com/odata?$select=name&$top=100",
+    ],
+)
+def test_url_policy_accepts_bare_dollar_path_segments(url):
+    """Bare ``$word`` is a legitimate URL convention (OData) and is inert
+    downstream — only brace placeholder forms are rejected."""
+    validate_remote_url(url)
 
 
 def test_metadata_ip_rejected_via_model():
