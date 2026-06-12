@@ -2202,22 +2202,23 @@ except OSError as e:
         except Exception as e:
             logger.warning(f"Scrapling browser install skipped: {e}")
 
-    async def _upload_mcp_client_module(
+    async def _upload_discovery_client(
         self, extra_servers: list[Any] | None = None
-    ) -> None:
-        """Upload the config-only ``mcp_client.py`` (no schema dependency).
+    ) -> str:
+        """Upload a config-only discovery client to a UNIQUE path; return it.
 
-        Split out from :meth:`_install_tool_modules` so the client — which the
-        in-sandbox discovery CLI imports — can be uploaded BEFORE any tool
-        schemas exist. The client is a pure function of the effective server
-        configs (transport/command/args/url/header-names), so it is safe to
-        regenerate ahead of discovery.
+        The client depends only on the effective server configs (no schemas),
+        so it can be generated before any discovery has run. It is written to
+        a per-call ``_internal`` temp path — never ``tools/mcp_client.py`` —
+        because concurrent discoveries (a bulk import fires several probes plus
+        the background kick at once) would otherwise clobber one another's
+        config and report spurious ``unknown server`` errors, and a probe must
+        never replace the runtime client the agent's wrappers import.
 
         ``extra_servers`` carries freshly-resolved configs for an on-demand
         discovery whose session may predate the edit. They are merged over the
         session's enabled set by name (override an edited server, append a new
-        one) so the probe sees pending changes without dropping other servers
-        from the runtime client.
+        one) so the probe sees pending changes.
         """
         assert self.runtime is not None
         work_dir = self._work_dir
@@ -2242,19 +2243,22 @@ except OSError as e:
         mcp_client_code = self.tool_generator.generate_mcp_client_code(
             enabled_servers, working_dir=work_dir
         )
-        mcp_client_path = f"{work_dir}/tools/mcp_client.py"
+        client_path = (
+            f"{work_dir}/_internal/.mcp_discover_client_{uuid.uuid4().hex}.py"
+        )
         await self._runtime_call(
             self.runtime.exec,
-            f"mkdir -p {shlex.quote(f'{work_dir}/tools')}",
+            f"mkdir -p {shlex.quote(f'{work_dir}/_internal')}",
             retry_policy=RetryPolicy.SAFE,
         )
         await self._runtime_call(
             self.runtime.upload_file,
             mcp_client_code.encode("utf-8"),
-            mcp_client_path,
+            client_path,
             retry_policy=RetryPolicy.SAFE,
         )
-        logger.debug("MCP client module installed", path=mcp_client_path)
+        logger.debug("MCP discovery client installed", path=client_path)
+        return client_path
 
     async def _install_tool_modules(self) -> None:
         """Generate and install tool modules + the MCP client from MCP servers."""
@@ -2444,14 +2448,15 @@ except OSError as e:
         assert self.runtime is not None
         work_dir = self._work_dir
 
-        # Upload a config-current mcp_client.py FIRST (it depends only on config,
-        # not on schemas) so discovery runs against the latest server set. Pass
-        # the servers being discovered so an on-demand probe reflects a pending
-        # add/edit the live session has not re-resolved yet (≤30s window).
-        await self._upload_mcp_client_module(extra_servers=servers)
+        # Upload a config-current discovery client FIRST (it depends only on
+        # config, not on schemas) so discovery runs against the latest server
+        # set. Pass the servers being discovered so an on-demand probe reflects
+        # a pending add/edit the live session has not re-resolved yet (≤30s
+        # window). The path is unique per call: concurrent discoveries must not
+        # read each other's config (spurious "unknown server" otherwise).
+        client_path = await self._upload_discovery_client(extra_servers=servers)
 
         sem = asyncio.Semaphore(self._DISCOVERY_CONCURRENCY)
-        client_path = f"{work_dir}/tools/mcp_client.py"
 
         async def _discover_one(server: Any) -> tuple[str, dict[str, Any]]:
             name = server.name
@@ -2503,7 +2508,19 @@ except OSError as e:
                     except Exception:
                         pass
 
-        pairs = await asyncio.gather(*[_discover_one(s) for s in servers])
+        try:
+            pairs = await asyncio.gather(*[_discover_one(s) for s in servers])
+        finally:
+            # Best-effort removal of this call's discovery client; never fail
+            # discovery on cleanup.
+            try:
+                await self._runtime_call(
+                    self.runtime.exec,
+                    f"rm -f {shlex.quote(client_path)}",
+                    retry_policy=RetryPolicy.SAFE,
+                )
+            except Exception:
+                pass
         return dict(pairs)
 
     async def _start_internal_mcp_servers(self) -> None:
