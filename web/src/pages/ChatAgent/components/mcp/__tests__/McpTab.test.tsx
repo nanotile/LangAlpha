@@ -20,7 +20,9 @@ const mutateAsync = {
 };
 
 let listData: EffectiveServerList | undefined;
-let catalogData: { servers: Array<{ name: string }> } | undefined;
+let catalogData:
+  | { servers: Array<{ name: string; transport?: string; description?: string }>; max_servers?: number }
+  | undefined;
 
 vi.mock('@/hooks/useMcpServers', () => ({
   useWorkspaceMcpServers: () => ({ data: listData, isLoading: false, error: null }),
@@ -32,10 +34,18 @@ vi.mock('@/hooks/useMcpServers', () => ({
   useImportWorkspaceMcpServers: () => ({ mutateAsync: mutateAsync.import, isPending: false }),
   usePromoteMcpServerToTemplate: () => ({ mutateAsync: mutateAsync.promote, isPending: false }),
   useMcpCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
+  // Catalog CRUD hooks are exercised via the Templates sub-view.
+  useCreateMcpCatalogServer: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useUpdateMcpCatalogServer: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteMcpCatalogServer: () => ({ mutateAsync: vi.fn(), isPending: false }),
   // Pass-through (no fake timers in this suite): the anti-flicker is unit-tested
   // separately in useMcpServers.test; here `synced` should reflect the raw value.
   useDelayedFalse: (v: boolean) => v,
 }));
+
+// Error feedback is a toast — mock the module so we can assert it was raised
+// (matches the existing toast-mock pattern across the codebase).
+vi.mock('@/components/ui/use-toast', () => ({ toast: vi.fn() }));
 
 // getVaultSecrets is called on mount for the secret picker; keep it benign.
 vi.mock('../../../utils/api', async (importOriginal) => {
@@ -68,6 +78,7 @@ vi.mock('../McpServerRow', () => ({
 }));
 
 import { McpTab } from '../McpTab';
+import { toast } from '@/components/ui/use-toast';
 
 function makeServer(name: string, overrides: Partial<EffectiveServer> = {}): EffectiveServer {
   return {
@@ -215,6 +226,37 @@ describe('McpTab — auto-resolve pending servers', () => {
 
     await waitFor(() => expect(screen.getByTestId('row-ok')).toBeInTheDocument());
     expect(mutateAsync.discover).not.toHaveBeenCalled();
+  });
+});
+
+describe('McpTab — add-from-template error surfacing (FIX 2)', () => {
+  it('surfaces a toast (and does not throw) when adding a template fails', async () => {
+    // Catalog has one template; the from_template add rejects.
+    catalogData = {
+      servers: [{ name: 'svc', transport: 'stdio', description: '' }],
+      max_servers: 20,
+    };
+    mutateAsync.add.mockRejectedValue({
+      response: { data: { detail: 'workspace at server cap' } },
+    });
+    renderWithProviders(<McpTab workspaceId="ws-1" />);
+
+    // Switch to the Templates sub-view and add the template to the workspace.
+    fireEvent.click(screen.getByRole('button', { name: /^templates$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /add to workspace/i }));
+
+    await waitFor(() =>
+      expect(mutateAsync.add).toHaveBeenCalledWith({ from_template: 'svc' }),
+    );
+    // The rejection is caught and surfaced — no unhandled rejection, user sees it.
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: 'destructive',
+          description: 'workspace at server cap',
+        }),
+      ),
+    );
   });
 });
 

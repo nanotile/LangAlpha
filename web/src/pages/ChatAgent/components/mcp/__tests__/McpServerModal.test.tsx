@@ -126,6 +126,111 @@ describe('McpServerModal — discovery_uses_secrets toggle', () => {
   });
 });
 
+describe('McpServerModal — edit-mode env/header hydration (data-loss guard)', () => {
+  // FIX 1: in edit mode env/headers must hydrate from the stored reference maps
+  // (real keys + ${vault:NAME}/literal values), so an unrelated edit re-saves the
+  // existing config intact. The old code seeded BLANK keys from env_refs, and
+  // kvsToMap drops blank-key rows → PUT silently erased every entry on save.
+  const editingStdio = {
+    name: 'srv',
+    origin: 'workspace' as const,
+    transport: 'stdio',
+    enabled: true,
+    editable: true,
+    deletable: true,
+    status: 'connected' as const,
+    error: '',
+    tool_count: 0,
+    tools: [],
+    missing_secrets: [],
+    env_refs: ['API_TOKEN'],
+    header_refs: [],
+    env: { API_TOKEN: '${vault:API_TOKEN}', REGION: 'us-east-1' },
+    headers: {},
+    description: 'old description',
+    instruction: '',
+    tool_exposure_mode: 'summary',
+    command: 'npx',
+    args: [],
+    url: null,
+    config_version: 1,
+  };
+
+  it('preserves env entries from the stored map when saving an unrelated edit', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<McpServerModal {...baseProps} initial={editingStdio} onSubmit={onSubmit} />);
+
+    // The env editor should be pre-filled with the REAL keys (not blank).
+    expect(screen.getByDisplayValue('API_TOKEN')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('REGION')).toBeInTheDocument();
+
+    // Touch an unrelated field, then save.
+    fireEvent.change(screen.getByPlaceholderText('What this server does'), {
+      target: { value: 'new description' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'srv',
+        description: 'new description',
+        // The full env config survives the save — no silent erasure.
+        env: { API_TOKEN: '${vault:API_TOKEN}', REGION: 'us-east-1' },
+      }),
+    );
+  });
+
+  it('preserves header entries from the stored map when saving an http server', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const editingHttp = {
+      ...editingStdio,
+      transport: 'http',
+      command: null,
+      url: 'https://example.com/mcp',
+      env: {},
+      env_refs: [],
+      headers: { Authorization: '${vault:AUTH}', 'X-Region': 'eu' },
+      header_refs: ['AUTH'],
+    };
+    render(<McpServerModal {...baseProps} initial={editingHttp} onSubmit={onSubmit} />);
+
+    expect(screen.getByDisplayValue('Authorization')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('X-Region')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('What this server does'), {
+      target: { value: 'edited' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        headers: { Authorization: '${vault:AUTH}', 'X-Region': 'eu' },
+      }),
+    );
+  });
+
+  it('falls back to refs-only hydration (blank keys) when the maps are absent (older backend)', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    // No `env`/`headers` maps — only the legacy refs. Keys come back blank, so
+    // kvsToMap drops them; this is the documented older-backend degradation.
+    const legacy = { ...editingStdio, env: undefined, headers: undefined };
+    render(<McpServerModal {...baseProps} initial={legacy} onSubmit={onSubmit} />);
+
+    // Refs-only hydration seeds a BLANK key (it can't recover the real key name),
+    // so the real keys from the map are NOT present.
+    expect(screen.queryByDisplayValue('API_TOKEN')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('REGION')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // Blank-key row drops → env empties (the legacy data-loss we now avoid when
+    // the backend returns the maps).
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ env: {} }));
+  });
+});
+
 describe('McpServerModal — validation gating', () => {
   it('disables Add until a valid name is entered', () => {
     render(<McpServerModal {...baseProps} />);

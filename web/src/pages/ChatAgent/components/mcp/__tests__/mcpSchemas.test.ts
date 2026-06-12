@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   validateMcpServer,
   validateRemoteUrl,
+  validateArg,
   isValidSecretValue,
   collectVaultRefs,
   ALLOWED_COMMANDS,
@@ -116,6 +117,46 @@ describe('mcpSchemas — secret value policy (vault-ref vs bare $VAR)', () => {
 
   it('rejects an invalid env key name', () => {
     expect(validateMcpServer(stdio({ env: { '1bad key': 'literal' } })).ok).toBe(false);
+  });
+});
+
+describe('mcpSchemas — stdio args policy (vault refs vs host-env placeholders)', () => {
+  // Embedded `${vault:NAME}` refs are legal in args (bulk import writes
+  // `--flag=${vault:NAME}`); a malformed vault ref or a bare host-env
+  // placeholder is rejected — mirroring env/header value policy.
+  it.each([
+    ['embedded vault ref', '--flag=${vault:TOKEN}'],
+    ['standalone vault ref', '${vault:TOKEN}'],
+    ['plain literal flag', '--verbose'],
+    ['plain literal value', 'package-name'],
+    ['empty string', ''],
+    ['non-identifier dollar ($100)', '$100'],
+    ['bare dollar before digit', '--cost=$50'],
+  ])('accepts %s', (_label, arg) => {
+    expect(validateArg(arg)).toBeNull();
+    expect(validateMcpServer(stdio({ args: [arg] })).ok).toBe(true);
+  });
+
+  it.each([
+    ['braced host-env', '${HOME}'],
+    ['dollar host-env', '$HOME'],
+    ['embedded host-env', '--dir=${HOME}/x'],
+  ])('rejects host-env placeholder %s', (_label, arg) => {
+    expect(validateArg(arg)).toMatch(/host-env placeholder/);
+    expect(validateMcpServer(stdio({ args: [arg] })).ok).toBe(false);
+  });
+
+  it.each([
+    ['unterminated vault ref', '--x=${vault:bad'],
+    ['bare malformed vault', '${vault:'],
+  ])('rejects malformed vault ref %s', (_label, arg) => {
+    expect(validateArg(arg)).toMatch(/malformed vault reference/);
+    expect(validateMcpServer(stdio({ args: [arg] })).ok).toBe(false);
+  });
+
+  it('validates every arg in the list (rejects when any one is bad)', () => {
+    expect(validateMcpServer(stdio({ args: ['-y', 'pkg', '--token=${vault:T}'] })).ok).toBe(true);
+    expect(validateMcpServer(stdio({ args: ['-y', '${HOME}'] })).ok).toBe(false);
   });
 });
 
