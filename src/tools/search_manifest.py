@@ -55,6 +55,7 @@ class SearchProviderSpec:
         return spec
 
 
+@lru_cache(maxsize=1)
 def _load_manifest() -> Dict[str, Any]:
     if not _MANIFEST_PATH.exists():
         raise RuntimeError(f"Search provider manifest not found at {_MANIFEST_PATH}")

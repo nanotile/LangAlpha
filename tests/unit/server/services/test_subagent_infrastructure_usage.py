@@ -77,6 +77,41 @@ async def test_persists_infra_usage_with_empty_per_call_records():
 
 
 @pytest.mark.asyncio
+async def test_tool_only_rows_carry_task_identity():
+    """A tool-only task (no LLM records) still gets task_id/agent_id/
+    subagent_type stamped onto token_usage: the real track_llm_usage([])
+    leaves a zeroed dict, not None, so the stamp must run."""
+    from src.server.services.persistence.usage import UsagePersistenceService
+
+    btm = _make_btm()
+    task = _make_task(
+        per_call_records=[],
+        tool_usage={"TavilySearchTool:deep": 2},
+        collector_response_id="resp-1",
+    )
+
+    service = UsagePersistenceService(
+        thread_id="thread-1", workspace_id="ws-1", user_id="user-1"
+    )
+    service.persist_usage = AsyncMock()
+
+    with patch(f"{USAGE_MODULE}.UsagePersistenceService", return_value=service):
+        await btm._persist_subagent_usage(
+            response_id="resp-1",
+            tasks=[task],
+            thread_id="thread-1",
+            workspace_id="ws-1",
+            user_id="user-1",
+        )
+
+    service.persist_usage.assert_awaited_once()
+    assert service._token_usage is not None
+    assert service._token_usage["task_id"] == "task01"
+    assert service._token_usage["agent_id"] == "general-purpose:task01"
+    assert service._token_usage["subagent_type"] == "general-purpose"
+
+
+@pytest.mark.asyncio
 async def test_no_tool_batch_when_tool_usage_empty():
     """When a task has token records but no tool usage, the infra batch call
     is skipped (no spurious empty infrastructure rows)."""
