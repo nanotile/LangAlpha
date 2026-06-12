@@ -55,6 +55,8 @@ export interface ExportServedPdfOptions {
   scale?: number;
   /** Draw an 'N / total' footer in the page margin. */
   pageNumbers?: boolean;
+  /** The "langalpha · <date>" footer. Server default is on; pass false to drop it. */
+  branding?: boolean;
 }
 
 /**
@@ -70,14 +72,16 @@ export async function exportServedPdf({
   printHint,
   scale,
   pageNumbers,
+  branding,
 }: ExportServedPdfOptions): Promise<void> {
   const servedHtmlUrl = servedUrl ?? buildWsfilesUrl(workspaceId, filePath);
   const pdfUrl = servedUrl
-    ? appendQueryParam(servedUrl, pdfQuery(scale, pageNumbers))
+    ? appendQueryParam(servedUrl, pdfQuery(scale, pageNumbers, branding))
     : buildWsfilesUrl(workspaceId, filePath, {
         format: 'pdf',
         pdfScale: scale,
         pdfPageNumbers: pageNumbers,
+        pdfBranding: branding,
       });
 
   const printFallback = () => {

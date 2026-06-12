@@ -380,6 +380,7 @@ class TestServeSharedFilePdf:
             workspace_serve_prefix=self._SERVE_PREFIX,
             scale=None,
             page_numbers=False,
+            branding=True,
         )
 
     async def test_format_pdf_not_permitted_returns_403(self, public_client):

@@ -23,23 +23,27 @@ export interface ServeUrlOptions {
   pdfScale?: number;
   /** PDF only: draw an 'N / total' footer in the page margin. */
   pdfPageNumbers?: boolean;
+  /** PDF only: the "langalpha · <date>" footer. Server default is on; only
+   *  an explicit false reaches the URL. */
+  pdfBranding?: boolean;
 }
 
 /** The ?format=pdf query string, with the optional render knobs appended. */
-export function pdfQuery(scale?: number, pageNumbers?: boolean): string {
+export function pdfQuery(scale?: number, pageNumbers?: boolean, branding?: boolean): string {
   let q = 'format=pdf';
   if (scale != null && scale !== 1) q += `&scale=${scale}`;
   if (pageNumbers) q += '&page_numbers=true';
+  if (branding === false) q += '&branding=false';
   return q;
 }
 
 export function buildWsfilesUrl(
   workspaceId: string,
   filePath: string,
-  { injectTheme = false, format, pdfScale, pdfPageNumbers }: ServeUrlOptions = {},
+  { injectTheme = false, format, pdfScale, pdfPageNumbers, pdfBranding }: ServeUrlOptions = {},
 ): string {
   const url = `${API_BASE}/api/v1/wsfiles/${encodeURIComponent(workspaceId)}/${encodePathSegments(filePath)}`;
-  if (format === 'pdf') return `${url}?${pdfQuery(pdfScale, pdfPageNumbers)}`;
+  if (format === 'pdf') return `${url}?${pdfQuery(pdfScale, pdfPageNumbers, pdfBranding)}`;
   return injectTheme ? `${url}?inject=theme` : url;
 }
 
@@ -53,9 +57,9 @@ export function buildWsfilesUrl(
 export function buildSharedServeUrl(
   shareToken: string,
   filePath: string,
-  { injectTheme = false, format, pdfScale, pdfPageNumbers }: ServeUrlOptions = {},
+  { injectTheme = false, format, pdfScale, pdfPageNumbers, pdfBranding }: ServeUrlOptions = {},
 ): string {
   const url = `${API_BASE}/api/v1/public/shared/${encodeURIComponent(shareToken)}/files/serve/${encodePathSegments(filePath)}`;
-  if (format === 'pdf') return `${url}?${pdfQuery(pdfScale, pdfPageNumbers)}`;
+  if (format === 'pdf') return `${url}?${pdfQuery(pdfScale, pdfPageNumbers, pdfBranding)}`;
   return injectTheme ? `${url}?inject=theme` : url;
 }

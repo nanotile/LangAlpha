@@ -8,7 +8,11 @@ route tests.
 
 from __future__ import annotations
 
-from src.server.services.pdf_render import _is_request_allowed, _viewport_from_page_size
+from src.server.services.pdf_render import (
+    _footer_template,
+    _is_request_allowed,
+    _viewport_from_page_size,
+)
 
 _PREFIX = "http://127.0.0.1:8000/api/v1/wsfiles/ws-abc-0001/"
 
@@ -116,3 +120,26 @@ def test_auto_and_unparseable_return_none():
 def test_absurd_dimensions_return_none():
     assert _viewport_from_page_size("10px 10px") is None
     assert _viewport_from_page_size("9000px 816px") is None
+
+
+# --- Footer template ---------------------------------------------------------
+
+
+def test_footer_branding_and_page_numbers():
+    footer = _footer_template(True, True, "2026-06-12")
+    assert "langalpha · 2026-06-12" in footer
+    assert 'class="pageNumber"' in footer
+    assert 'class="totalPages"' in footer
+
+
+def test_footer_branding_only():
+    footer = _footer_template(True, False, "2026-06-12")
+    assert "langalpha · 2026-06-12" in footer
+    assert "pageNumber" not in footer
+
+
+def test_footer_page_numbers_only():
+    footer = _footer_template(False, True, "2026-06-12")
+    assert "langalpha" not in footer
+    assert "2026-06-12" not in footer
+    assert 'class="pageNumber"' in footer

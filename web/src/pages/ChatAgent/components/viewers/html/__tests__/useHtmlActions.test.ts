@@ -62,6 +62,15 @@ describe('buildWsfilesUrl', () => {
       buildWsfilesUrl('ws-1', 'results/report.html', { format: 'pdf', pdfScale: 1 }),
     ).toBe('/api/v1/wsfiles/ws-1/results/report.html?format=pdf');
   });
+
+  it('appends branding=false only when branding is explicitly off', () => {
+    expect(
+      buildWsfilesUrl('ws-1', 'results/report.html', { format: 'pdf', pdfBranding: false }),
+    ).toBe('/api/v1/wsfiles/ws-1/results/report.html?format=pdf&branding=false');
+    expect(
+      buildWsfilesUrl('ws-1', 'results/report.html', { format: 'pdf', pdfBranding: true }),
+    ).toBe('/api/v1/wsfiles/ws-1/results/report.html?format=pdf');
+  });
 });
 
 describe('buildSharedServeUrl', () => {
@@ -272,8 +281,11 @@ describe('useHtmlActions — file mode', () => {
       printHint: 'hint',
       scale: 0.8,
       pageNumbers: true,
+      branding: false,
     });
-    expect(fetchMock).toHaveBeenCalledWith(`${served}?format=pdf&scale=0.8&page_numbers=true`);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${served}?format=pdf&scale=0.8&page_numbers=true&branding=false`,
+    );
     expect(lastAnchor?.download).toBe('report.pdf');
   });
 

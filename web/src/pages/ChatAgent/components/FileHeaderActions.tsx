@@ -101,6 +101,7 @@ function FileHeaderActions({
   const pdfInFlight = useRef(false);
   const [pdfScale, setPdfScale] = useState(1);
   const [pdfPageNumbers, setPdfPageNumbers] = useState(false);
+  const [pdfBranding, setPdfBranding] = useState(true);
 
   const handleExportHtmlPdf = async () => {
     if (!selectedFile || pdfInFlight.current) return;
@@ -113,6 +114,7 @@ function FileHeaderActions({
         printHint: t('filePanel.pdfPrintHint'),
         scale: pdfScale,
         pageNumbers: pdfPageNumbers,
+        branding: pdfBranding,
       });
     } finally {
       pdfInFlight.current = false;
@@ -231,6 +233,15 @@ function FileHeaderActions({
               {t('filePanel.pdfOptions')}
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
+              <DropdownMenuItem
+                onSelect={(e) => {
+                  e.preventDefault();
+                  setPdfBranding((v) => !v);
+                }}
+              >
+                <Check className={cn('h-3.5 w-3.5', !pdfBranding && 'invisible')} />
+                {t('filePanel.pdfBranding')}
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onSelect={(e) => {
                   e.preventDefault();

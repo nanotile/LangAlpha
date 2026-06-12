@@ -264,6 +264,7 @@ describe('FileHeaderActions', () => {
         printHint: 'filePanel.pdfPrintHint',
         scale: 1,
         pageNumbers: false,
+        branding: true,
       });
     });
   });
@@ -278,12 +279,13 @@ describe('FileHeaderActions', () => {
       />,
     );
     expect(screen.getByText('filePanel.pdfOptions')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('filePanel.pdfBranding'));
     fireEvent.click(screen.getByText('filePanel.pdfPageNumbers'));
     fireEvent.click(screen.getByText('80%'));
     fireEvent.click(screen.getByText('filePanel.saveAsPdf'));
     await waitFor(() => {
       expect(exportServedPdfMock).toHaveBeenCalledWith(
-        expect.objectContaining({ scale: 0.8, pageNumbers: true }),
+        expect.objectContaining({ scale: 0.8, pageNumbers: true, branding: false }),
       );
     });
   });

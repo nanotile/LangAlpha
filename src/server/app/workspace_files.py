@@ -1325,6 +1325,7 @@ async def render_workspace_file_pdf(
     workspace: dict[str, Any] | None = None,
     scale: float | None = None,
     page_numbers: bool = False,
+    branding: bool = True,
 ) -> Response:
     """Render a workspace HTML file to PDF via headless Chromium.
 
@@ -1369,6 +1370,7 @@ async def render_workspace_file_pdf(
             workspace_serve_prefix=serve_prefix,
             scale=scale,
             page_numbers=page_numbers,
+            branding=branding,
         )
     except pdf_render.PdfRenderUnavailable:
         raise HTTPException(status_code=501, detail="PDF rendering not available")
@@ -1401,17 +1403,21 @@ async def serve_workspace_file_endpoint(
     page_numbers: bool = Query(
         False, description="PDF only: draw an 'N / total' footer in the page margin."
     ),
+    branding: bool = Query(
+        True, description="PDF only: stamp 'langalpha · <date>' in the footer."
+    ),
 ) -> Response:
     """Serve a workspace file by path with sandboxed CSP (unauthenticated).
 
     Workspace UUID is the credential; uniform 404 for unknown workspace,
     missing file, or traversal. ``?inject=theme`` adds theme-sync to HTML only.
     ``?format=pdf`` renders HTML files to PDF server-side; other values serve
-    normally. ``scale`` and ``page_numbers`` apply only with ``format=pdf``.
+    normally. ``scale``, ``page_numbers``, and ``branding`` apply only with
+    ``format=pdf``.
     """
     if format == "pdf":
         return await render_workspace_file_pdf(
-            workspace_id, path, scale=scale, page_numbers=page_numbers
+            workspace_id, path, scale=scale, page_numbers=page_numbers, branding=branding
         )
     return await serve_workspace_file(
         workspace_id, path, inject_theme=(inject == "theme")

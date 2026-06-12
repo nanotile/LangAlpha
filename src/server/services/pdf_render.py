@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -235,15 +236,27 @@ _CANVAS_CLAMP_CSS = "canvas { max-width: 100% !important; }"
 PDF_SCALE_MIN = 0.5
 PDF_SCALE_MAX = 2.0
 
-# Header/footer drawn by Chromium in the page margins when page numbers are
-# requested. The header must be explicitly blank or Chromium prints its
-# default date/title line. Templates require inline font-size or render at 0.
+# Header/footer drawn by Chromium in the page margins when branding or page
+# numbers are requested. The header must be explicitly blank or Chromium
+# prints its default date/title line. Templates require inline font-size or
+# render at 0.
 _PDF_HEADER_TEMPLATE = "<span></span>"
-_PDF_FOOTER_TEMPLATE = (
-    '<div style="font-size:9px; width:100%; text-align:center; color:#777;">'
-    '<span class="pageNumber"></span> / <span class="totalPages"></span>'
-    "</div>"
-)
+
+
+def _footer_template(branding: bool, page_numbers: bool, date_str: str) -> str:
+    """Footer HTML: branding ("langalpha · date") left, page count right."""
+    left = f"<span>langalpha · {date_str}</span>" if branding else "<span></span>"
+    right = (
+        '<span><span class="pageNumber"></span> / <span class="totalPages"></span></span>'
+        if page_numbers
+        else "<span></span>"
+    )
+    return (
+        '<div style="width:100%; font-size:9px; color:#777; padding:0 12mm; '
+        'display:flex; justify-content:space-between;">'
+        f"{left}{right}"
+        "</div>"
+    )
 
 _EXECUTABLE_MISSING_HINT = "executable doesn't exist"
 
@@ -290,15 +303,17 @@ async def render_workspace_pdf(
     workspace_serve_prefix: str,
     scale: float | None = None,
     page_numbers: bool = False,
+    branding: bool = True,
 ) -> bytes:
     """Render a workspace HTML URL to PDF bytes in headless Chromium.
 
     ``internal_url`` is the server's own loopback wsfiles URL; subresource
     requests are SSRF-gated to ``workspace_serve_prefix`` plus the CDN
     allowlist. ``scale`` (clamped to 0.5–2.0) shrinks/enlarges the whole
-    rendering; ``page_numbers`` draws a centered ``N / total`` footer in the
-    page margin. Raises ``PdfRenderUnavailable`` / ``PdfRenderTimeout`` /
-    ``PdfRenderError`` for the corresponding failure classes.
+    rendering; ``branding`` (default on) stamps "langalpha · <date>" in the
+    footer and ``page_numbers`` adds ``N / total`` beside it. Raises
+    ``PdfRenderUnavailable`` / ``PdfRenderTimeout`` / ``PdfRenderError`` for
+    the corresponding failure classes.
     """
     from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -344,10 +359,12 @@ async def render_workspace_pdf(
                 pdf_kwargs: dict = {"print_background": True, "prefer_css_page_size": True}
                 if scale is not None:
                     pdf_kwargs["scale"] = min(PDF_SCALE_MAX, max(PDF_SCALE_MIN, scale))
-                if page_numbers:
+                if branding or page_numbers:
                     pdf_kwargs["display_header_footer"] = True
                     pdf_kwargs["header_template"] = _PDF_HEADER_TEMPLATE
-                    pdf_kwargs["footer_template"] = _PDF_FOOTER_TEMPLATE
+                    pdf_kwargs["footer_template"] = _footer_template(
+                        branding, page_numbers, datetime.now().strftime("%Y-%m-%d")
+                    )
                 return await page.pdf(**pdf_kwargs)
 
             try:

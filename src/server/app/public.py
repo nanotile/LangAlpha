@@ -467,6 +467,9 @@ async def serve_shared_file(
     page_numbers: bool = Query(
         False, description="PDF only: draw an 'N / total' footer in the page margin."
     ),
+    branding: bool = Query(
+        True, description="PDF only: stamp 'langalpha · <date>' in the footer."
+    ),
 ) -> Response:
     """Serve a shared workspace file inline with a sandboxed CSP. Requires allow_files.
 
@@ -485,7 +488,12 @@ async def serve_shared_file(
 
     if format == "pdf":
         return await render_workspace_file_pdf(
-            workspace_id, path, workspace=workspace, scale=scale, page_numbers=page_numbers
+            workspace_id,
+            path,
+            workspace=workspace,
+            scale=scale,
+            page_numbers=page_numbers,
+            branding=branding,
         )
 
     return await serve_workspace_file(

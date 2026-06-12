@@ -429,6 +429,7 @@ async def test_format_pdf_renders_html(mock_ws, mock_fp, _wd, _vault, mock_rende
         format="pdf",
         scale=None,
         page_numbers=False,
+        branding=True,
     )
 
     assert resp.status_code == 200
@@ -445,6 +446,7 @@ async def test_format_pdf_renders_html(mock_ws, mock_fp, _wd, _vault, mock_rende
         workspace_serve_prefix=_EXPECTED_SERVE_PREFIX,
         scale=None,
         page_numbers=False,
+        branding=True,
     )
 
 
@@ -470,6 +472,7 @@ async def test_format_pdf_scale_and_page_numbers_pass_through(
         format="pdf",
         scale=0.8,
         page_numbers=True,
+        branding=False,
     )
 
     assert resp.status_code == 200
@@ -478,6 +481,7 @@ async def test_format_pdf_scale_and_page_numbers_pass_through(
         workspace_serve_prefix=_EXPECTED_SERVE_PREFIX,
         scale=0.8,
         page_numbers=True,
+        branding=False,
     )
 
 
