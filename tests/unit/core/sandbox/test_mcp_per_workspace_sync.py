@@ -503,6 +503,95 @@ class TestDiscoverUserMcpSchemas:
         )  # session servers not dropped
 
     @pytest.mark.asyncio
+    async def test_discovery_client_path_unique_per_call(self, discovery_sandbox):
+        """Each discovery call uploads its client to its own temp path — never
+        the runtime ``tools/mcp_client.py`` — and removes it afterwards."""
+        sandbox = discovery_sandbox
+        uploaded: list[str] = []
+        exec_cmds: list[str] = []
+
+        async def fake_upload(data, path, **k):
+            uploaded.append(path)
+
+        async def fake_exec(cmd, **k):
+            exec_cmds.append(cmd)
+            return ExecResult("", "", 0)
+
+        sandbox.runtime.upload_file = AsyncMock(side_effect=fake_upload)
+        sandbox.runtime.exec = AsyncMock(side_effect=fake_exec)
+        sandbox.adownload_file_bytes = AsyncMock(return_value=None)
+
+        server = _user("alpha", transport="http", url="https://a.test")
+        await sandbox.discover_user_mcp_schemas([server])
+        await sandbox.discover_user_mcp_schemas([server])
+
+        client_paths = [p for p in uploaded if p.endswith(".py")]
+        assert len(client_paths) == 2
+        assert len(set(client_paths)) == 2  # unique per call
+        for path in client_paths:
+            assert "/_internal/" in path
+            assert not path.endswith("tools/mcp_client.py")
+        # The discover exec targets the client uploaded by ITS OWN call, and
+        # the client temp file is cleaned up afterwards.
+        first_discover = next(c for c in exec_cmds if " discover " in c)
+        assert client_paths[0] in first_discover
+        assert any(
+            c.startswith("rm -f") and client_paths[0] in c for c in exec_cmds
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_discoveries_do_not_clobber_each_other(
+        self, discovery_sandbox
+    ):
+        """Regression: two concurrent discovery calls (bulk-import probe storm)
+        must each exec against a client containing THEIR server. With a shared
+        client path, the second upload clobbers the first and discovery reports
+        a spurious ``unknown server``."""
+        import asyncio
+        import shlex
+
+        sandbox = discovery_sandbox
+        uploads: dict[str, str] = {}
+        both_uploaded = asyncio.Event()
+
+        def gen(servers, working_dir="/home/workspace"):
+            return "# client " + ",".join(s.name for s in servers)
+
+        sandbox.tool_generator.generate_mcp_client_code = MagicMock(side_effect=gen)
+
+        async def fake_upload(data, path, **k):
+            uploads[path] = data.decode()
+            if len([p for p in uploads if p.endswith(".py")]) >= 2:
+                both_uploaded.set()
+
+        seen: dict[str, bool] = {}
+
+        async def fake_exec(cmd, **k):
+            if " discover " in cmd:
+                # Hold every exec until BOTH calls uploaded their client, so a
+                # shared-path implementation is guaranteed to be clobbered.
+                await asyncio.wait_for(both_uploaded.wait(), timeout=5)
+                tokens = shlex.split(cmd)
+                client = next(t for t in tokens if t.endswith(".py"))
+                name = tokens[tokens.index("discover") + 1]
+                seen[name] = name in uploads.get(client, "")
+            return ExecResult("", "", 0)
+
+        sandbox.runtime.upload_file = AsyncMock(side_effect=fake_upload)
+        sandbox.runtime.exec = AsyncMock(side_effect=fake_exec)
+        sandbox.adownload_file_bytes = AsyncMock(return_value=None)
+
+        await asyncio.gather(
+            sandbox.discover_user_mcp_schemas(
+                [_user("gamma", transport="http", url="https://g.test")]
+            ),
+            sandbox.discover_user_mcp_schemas(
+                [_user("delta", transport="http", url="https://d.test")]
+            ),
+        )
+        assert seen == {"gamma": True, "delta": True}
+
+    @pytest.mark.asyncio
     async def test_uploads_client_before_discovery(self, discovery_sandbox):
         """mcp_client.py is uploaded FIRST (bootstrapping order) so discovery
         runs against the current config."""
