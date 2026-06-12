@@ -19,9 +19,10 @@ function encodePathSegments(filePath: string): string {
 export function buildWsfilesUrl(
   workspaceId: string,
   filePath: string,
-  { injectTheme = false }: { injectTheme?: boolean } = {},
+  { injectTheme = false, format }: { injectTheme?: boolean; format?: 'pdf' } = {},
 ): string {
   const url = `${API_BASE}/api/v1/wsfiles/${encodeURIComponent(workspaceId)}/${encodePathSegments(filePath)}`;
+  if (format === 'pdf') return `${url}?format=pdf`;
   return injectTheme ? `${url}?inject=theme` : url;
 }
 
@@ -35,8 +36,9 @@ export function buildWsfilesUrl(
 export function buildSharedServeUrl(
   shareToken: string,
   filePath: string,
-  { injectTheme = false }: { injectTheme?: boolean } = {},
+  { injectTheme = false, format }: { injectTheme?: boolean; format?: 'pdf' } = {},
 ): string {
   const url = `${API_BASE}/api/v1/public/shared/${encodeURIComponent(shareToken)}/files/serve/${encodePathSegments(filePath)}`;
+  if (format === 'pdf') return `${url}?format=pdf`;
   return injectTheme ? `${url}?inject=theme` : url;
 }

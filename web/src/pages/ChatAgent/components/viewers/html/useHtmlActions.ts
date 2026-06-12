@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from '@/components/ui/use-toast';
 import { buildWsfilesUrl } from './wsfilesUrl';
@@ -30,7 +30,7 @@ export type UseHtmlActionsOptions = WidgetModeOptions | FileModeOptions;
 export interface HtmlActions {
   openInNewTab: () => void;
   downloadHtml: () => void;
-  exportPdf: () => void;
+  exportPdf: () => void | Promise<void>;
   copySource: () => void;
 }
 
@@ -38,15 +38,30 @@ function fileNameFromPath(filePath: string): string {
   return filePath.split('/').pop() || 'download.html';
 }
 
+/** `<file stem>.pdf` for the server-rendered download (e.g. report.html → report.pdf). */
+function pdfNameFromPath(filePath: string): string {
+  const base = fileNameFromPath(filePath);
+  return `${base.replace(/\.[^.]+$/, '')}.pdf`;
+}
+
+/** Append a query param, respecting whether the URL already carries one. */
+function appendQueryParam(url: string, param: string): string {
+  return `${url}${url.includes('?') ? '&' : '?'}${param}`;
+}
+
 /**
  * Open/download/print/copy actions for an HTML surface.
  *
  * Widget mode operates on a blob built from the srcDoc; file mode points at the
  * served wsfiles URL (byte-faithful — no ?inject=theme so downloads match the
- * original) and downloads the server's original bytes.
+ * original) and downloads the server's original bytes. exportPdf fetches the
+ * server-rendered PDF (?format=pdf) and falls back to browser print on any
+ * non-OK response.
  */
 export function useHtmlActions(opts: UseHtmlActionsOptions): HtmlActions {
   const { t } = useTranslation();
+  // Server PDF renders take seconds; ignore re-entry while one is in flight.
+  const pdfInFlight = useRef(false);
 
   const openInNewTab = useCallback(() => {
     if (opts.mode === 'widget') {
@@ -80,12 +95,12 @@ export function useHtmlActions(opts: UseHtmlActionsOptions): HtmlActions {
     }
   }, [opts]);
 
-  const exportPdf = useCallback(() => {
+  const exportPdf = useCallback(async () => {
     if (opts.mode === 'widget') {
       const blob = new Blob([opts.srcDoc], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
-      const win = window.open(url, '_blank', 'noopener,noreferrer');
-      // Same-origin blob tab: auto-print once it loads.
+      // Same-origin blob tab: keep the handle (no noopener) so auto-print fires.
+      const win = window.open(url, '_blank');
       if (win) {
         const triggerPrint = () => {
           try {
@@ -98,16 +113,48 @@ export function useHtmlActions(opts: UseHtmlActionsOptions): HtmlActions {
         setTimeout(triggerPrint, 800);
       }
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } else {
-      const url = opts.servedUrl ?? buildWsfilesUrl(opts.workspaceId, opts.filePath);
-      const win = window.open(url, '_blank', 'noopener,noreferrer');
-      // Opaque cross-origin tab: auto-print is usually blocked — fall back to a hint.
+      return;
+    }
+
+    // File mode: download the server-rendered PDF, falling back to browser print.
+    if (pdfInFlight.current) return;
+    pdfInFlight.current = true;
+
+    const servedHtmlUrl = opts.servedUrl ?? buildWsfilesUrl(opts.workspaceId, opts.filePath);
+    const pdfUrl = opts.servedUrl
+      ? appendQueryParam(opts.servedUrl, 'format=pdf')
+      : buildWsfilesUrl(opts.workspaceId, opts.filePath, { format: 'pdf' });
+
+    const printFallback = () => {
+      // Keep the handle (no noopener) so we can drive print on the new tab.
+      const win = window.open(servedHtmlUrl, '_blank');
       try {
         if (!win) throw new Error('popup blocked');
         win.print();
       } catch {
         toast({ description: t('filePanel.pdfPrintHint') });
       }
+    };
+
+    try {
+      const res = await fetch(pdfUrl);
+      if (!res.ok) {
+        printFallback();
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = pdfNameFromPath(opts.filePath);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      printFallback();
+    } finally {
+      pdfInFlight.current = false;
     }
   }, [opts, t]);
 

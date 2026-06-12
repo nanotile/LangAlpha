@@ -25,6 +25,7 @@ from src.server.app.workspace_files import (
     serve_workspace_file,
     serve_workspace_file_endpoint,
 )
+from src.server.services import pdf_render
 
 WS_ID = "ws-test-0001"
 OWNER = "user-test-1"
@@ -33,6 +34,8 @@ _DBWS_PATCH = "src.server.app.workspace_files.db_get_workspace"
 _FP_PATCH = "src.server.app.workspace_files.FilePersistenceService"
 _WD_PATCH = "src.server.app.workspace_files._get_work_dir"
 _SANDBOX_PATCH = "src.server.app.workspace_files._acquire_sandbox"
+_RENDER_PATCH = "src.server.services.pdf_render.render_workspace_pdf"
+_PDF_INTERNAL_BASE = "http://127.0.0.1:8000"
 
 
 def _workspace(status: str) -> dict:
@@ -395,3 +398,153 @@ async def test_endpoint_without_inject_is_byte_faithful(mock_ws, mock_fp, _wd, _
         workspace_id=WS_ID, path="results/report.html", inject=None
     )
     assert resp.body == html.encode()
+
+
+# --- ?format=pdf: render HTML to PDF --------------------------------------
+#
+# render_workspace_pdf is mocked everywhere — CI has no Chromium. The pre-
+# validation path (resolve bytes + require HTML) reuses the DB-fallback fixtures.
+
+_EXPECTED_INTERNAL_URL = f"{_PDF_INTERNAL_BASE}/api/v1/wsfiles/{WS_ID}/results/report.html"
+_EXPECTED_SERVE_PREFIX = f"{_PDF_INTERNAL_BASE}/api/v1/wsfiles/{WS_ID}/"
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_renders_html(mock_ws, mock_fp, _wd, _vault, mock_render):
+    mock_ws.return_value = _workspace("stopped")
+    mock_fp.get_file_content = AsyncMock(
+        return_value=_db_text_record("<html><body>report</body></html>")
+    )
+    mock_render.return_value = b"%PDF-1.7 fake pdf bytes"
+
+    resp = await serve_workspace_file_endpoint(
+        workspace_id=WS_ID, path="results/report.html", inject=None, format="pdf"
+    )
+
+    assert resp.status_code == 200
+    assert resp.media_type == "application/pdf"
+    assert resp.body == b"%PDF-1.7 fake pdf bytes"
+    cd = resp.headers["Content-Disposition"]
+    assert cd.startswith("attachment")
+    assert 'filename="report.pdf"' in cd
+    assert resp.headers["Cache-Control"] == "private, max-age=60"
+    # No CSP on the PDF response.
+    assert "Content-Security-Policy" not in resp.headers
+    mock_render.assert_awaited_once_with(
+        _EXPECTED_INTERNAL_URL, workspace_serve_prefix=_EXPECTED_SERVE_PREFIX
+    )
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_on_non_html_returns_404_no_render(
+    mock_ws, mock_fp, _wd, _vault, mock_render
+):
+    mock_ws.return_value = _workspace("stopped")
+    mock_fp.get_file_content = AsyncMock(
+        return_value=_db_text_record("body{color:red}", mime="text/css")
+    )
+    with pytest.raises(HTTPException) as exc:
+        await serve_workspace_file_endpoint(
+            workspace_id=WS_ID, path="results/style.css", inject=None, format="pdf"
+        )
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Not found"
+    mock_render.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_on_missing_file_returns_404_no_render(
+    mock_ws, mock_fp, _wd, _vault, mock_render
+):
+    mock_ws.return_value = _workspace("stopped")
+    mock_fp.get_file_content = AsyncMock(return_value=None)
+    with pytest.raises(HTTPException) as exc:
+        await serve_workspace_file_endpoint(
+            workspace_id=WS_ID, path="results/missing.html", inject=None, format="pdf"
+        )
+    assert exc.value.status_code == 404
+    mock_render.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "render_exc, expected_status",
+    [
+        (pdf_render.PdfRenderUnavailable("no chromium"), 501),
+        (pdf_render.PdfRenderTimeout("timed out"), 504),
+        (pdf_render.PdfRenderError("boom"), 500),
+    ],
+)
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_render_errors_map_to_status(
+    mock_ws, mock_fp, _wd, _vault, mock_render, render_exc, expected_status
+):
+    mock_ws.return_value = _workspace("stopped")
+    mock_fp.get_file_content = AsyncMock(
+        return_value=_db_text_record("<html><body>x</body></html>")
+    )
+    mock_render.side_effect = render_exc
+    with pytest.raises(HTTPException) as exc:
+        await serve_workspace_file_endpoint(
+            workspace_id=WS_ID, path="results/report.html", inject=None, format="pdf"
+        )
+    assert exc.value.status_code == expected_status
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_traversal_returns_404_no_render(
+    mock_ws, mock_fp, _wd, _vault, mock_render
+):
+    with pytest.raises(HTTPException) as exc:
+        await serve_workspace_file_endpoint(
+            workspace_id=WS_ID,
+            path="results/../../etc/passwd",
+            inject=None,
+            format="pdf",
+        )
+    assert exc.value.status_code == 404
+    mock_render.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_unknown_format_serves_normally(mock_ws, mock_fp, _wd, _vault, mock_render):
+    mock_ws.return_value = _workspace("stopped")
+    html = "<html><head></head><body>plain</body></html>"
+    mock_fp.get_file_content = AsyncMock(return_value=_db_text_record(html))
+    # An unrecognized format value falls through to a normal inline serve.
+    resp = await serve_workspace_file_endpoint(
+        workspace_id=WS_ID, path="results/report.html", inject=None, format="docx"
+    )
+    assert resp.status_code == 200
+    assert resp.media_type == "text/html; charset=utf-8"
+    assert resp.body == html.encode()
+    mock_render.assert_not_awaited()

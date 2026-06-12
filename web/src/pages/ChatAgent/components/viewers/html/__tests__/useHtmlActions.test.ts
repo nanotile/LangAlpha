@@ -40,6 +40,15 @@ describe('buildWsfilesUrl', () => {
     );
     expect(buildWsfilesUrl('ws-1', 'results/report.html')).not.toContain('inject=theme');
   });
+
+  it('appends ?format=pdf when format is pdf (takes precedence over inject)', () => {
+    expect(buildWsfilesUrl('ws-1', 'results/report.html', { format: 'pdf' })).toBe(
+      '/api/v1/wsfiles/ws-1/results/report.html?format=pdf',
+    );
+    expect(
+      buildWsfilesUrl('ws-1', 'results/report.html', { format: 'pdf', injectTheme: true }),
+    ).toBe('/api/v1/wsfiles/ws-1/results/report.html?format=pdf');
+  });
 });
 
 describe('buildSharedServeUrl', () => {
@@ -60,6 +69,12 @@ describe('buildSharedServeUrl', () => {
       '/api/v1/public/shared/tok-1/files/serve/results/report.html?inject=theme',
     );
     expect(buildSharedServeUrl('tok-1', 'results/report.html')).not.toContain('inject=theme');
+  });
+
+  it('appends ?format=pdf when format is pdf', () => {
+    expect(buildSharedServeUrl('tok-1', 'results/report.html', { format: 'pdf' })).toBe(
+      '/api/v1/public/shared/tok-1/files/serve/results/report.html?format=pdf',
+    );
   });
 });
 
@@ -109,13 +124,25 @@ describe('useHtmlActions — widget mode', () => {
     createSpy.mockRestore();
   });
 
-  it('opens a blob tab and auto-prints for PDF', () => {
+  it('opens a blob tab WITHOUT noopener so auto-print fires for PDF', () => {
+    vi.useFakeTimers();
     const print = vi.fn();
     open.mockReturnValue({ print, addEventListener: vi.fn() });
     const { result } = renderHook(() =>
       useHtmlActions({ mode: 'widget', srcDoc: WIDGET_SRCDOC }),
     );
     result.current.exportPdf();
+    // No noopener — we need the window handle to drive print on a same-origin blob.
+    expect(open).toHaveBeenCalledWith('blob:widget-url', '_blank');
+    vi.advanceTimersByTime(800);
+    expect(print).toHaveBeenCalled();
+  });
+
+  it('opens in a new tab WITH noopener (no handle needed there)', () => {
+    const { result } = renderHook(() =>
+      useHtmlActions({ mode: 'widget', srcDoc: WIDGET_SRCDOC }),
+    );
+    result.current.openInNewTab();
     expect(open).toHaveBeenCalledWith('blob:widget-url', '_blank', 'noopener,noreferrer');
   });
 
@@ -132,14 +159,45 @@ describe('useHtmlActions — widget mode', () => {
 
 describe('useHtmlActions — file mode', () => {
   let open: ReturnType<typeof vi.fn>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let createObjectURL: ReturnType<typeof vi.fn>;
+  let revokeObjectURL: ReturnType<typeof vi.fn>;
+  let anchorClick: ReturnType<typeof vi.fn>;
+  let lastAnchor: HTMLAnchorElement | undefined;
+  let createSpy: { mockRestore: () => void };
+
+  /** A Response stub whose .blob() resolves so the download path completes. */
+  const pdfResponse = (ok: boolean, status = ok ? 200 : 501) => ({
+    ok,
+    status,
+    blob: vi.fn().mockResolvedValue(new Blob(['%PDF'], { type: 'application/pdf' })),
+  });
 
   beforeEach(() => {
     open = vi.fn(() => ({ print: vi.fn() }));
+    fetchMock = vi.fn();
+    createObjectURL = vi.fn(() => 'blob:pdf-url');
+    revokeObjectURL = vi.fn();
+    anchorClick = vi.fn();
+    lastAnchor = undefined;
     vi.stubGlobal('open', open);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+
+    const realCreate = document.createElement.bind(document);
+    createSpy = vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      const el = realCreate(tag) as HTMLElement;
+      if (tag === 'a') {
+        (el as HTMLAnchorElement).click = anchorClick;
+        lastAnchor = el as HTMLAnchorElement;
+      }
+      return el;
+    });
     toastMock.mockClear();
   });
 
   afterEach(() => {
+    createSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
@@ -170,22 +228,88 @@ describe('useHtmlActions — file mode', () => {
     expect(triggerDownload).toHaveBeenCalledWith('ws-1', 'results/report.html');
   });
 
-  it('opens the served URL and attempts print for PDF', () => {
+  it('fetches the server PDF and downloads it via an anchor named <stem>.pdf', async () => {
+    fetchMock.mockResolvedValue(pdfResponse(true));
+    const { result } = renderHook(() =>
+      useHtmlActions({ mode: 'file', workspaceId: 'ws-1', filePath: 'results/report.html', content: '<p>x</p>' }),
+    );
+    await result.current.exportPdf();
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/wsfiles/ws-1/results/report.html?format=pdf');
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(lastAnchor?.download).toBe('report.pdf');
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalled();
+    // No print fallback on the success path.
+    expect(open).not.toHaveBeenCalled();
+    expect(toastMock).not.toHaveBeenCalled();
+  });
+
+  it('composes ?format=pdf onto the servedUrl override (share page)', async () => {
+    fetchMock.mockResolvedValue(pdfResponse(true));
+    const served = '/api/v1/public/shared/tok-1/files/serve/results/report.html';
+    const { result } = renderHook(() =>
+      useHtmlActions({
+        mode: 'file',
+        workspaceId: '',
+        filePath: 'results/report.html',
+        content: '<p>x</p>',
+        servedUrl: served,
+      }),
+    );
+    await result.current.exportPdf();
+    expect(fetchMock).toHaveBeenCalledWith(`${served}?format=pdf`);
+    expect(lastAnchor?.download).toBe('report.pdf');
+  });
+
+  it('appends ?format=pdf with & when the servedUrl already has a query', async () => {
+    fetchMock.mockResolvedValue(pdfResponse(true));
+    const served = '/api/v1/public/shared/tok-1/files/serve/results/report.html?v=2';
+    const { result } = renderHook(() =>
+      useHtmlActions({
+        mode: 'file',
+        workspaceId: '',
+        filePath: 'results/report.html',
+        content: '<p>x</p>',
+        servedUrl: served,
+      }),
+    );
+    await result.current.exportPdf();
+    expect(fetchMock).toHaveBeenCalledWith(`${served}&format=pdf`);
+  });
+
+  it('falls back to print (no noopener) + hint toast on a non-OK response (501)', async () => {
+    fetchMock.mockResolvedValue(pdfResponse(false, 501));
+    open.mockReturnValue({
+      print: () => {
+        throw new Error('cross-origin print blocked');
+      },
+    });
+    const { result } = renderHook(() =>
+      useHtmlActions({ mode: 'file', workspaceId: 'ws-1', filePath: 'results/report.html', content: '<p>x</p>' }),
+    );
+    await result.current.exportPdf();
+    // Keep the handle: open with no third arg.
+    expect(open).toHaveBeenCalledWith('/api/v1/wsfiles/ws-1/results/report.html', '_blank');
+    expect(toastMock).toHaveBeenCalledWith({ description: 'filePanel.pdfPrintHint' });
+    // No anchor download on the failure path.
+    expect(anchorClick).not.toHaveBeenCalled();
+  });
+
+  it('attempts print and does not toast when the print call succeeds after a 501', async () => {
     const print = vi.fn();
+    fetchMock.mockResolvedValue(pdfResponse(false, 501));
     open.mockReturnValue({ print });
     const { result } = renderHook(() =>
       useHtmlActions({ mode: 'file', workspaceId: 'ws-1', filePath: 'results/report.html', content: '<p>x</p>' }),
     );
-    result.current.exportPdf();
-    expect(open).toHaveBeenCalledWith(
-      '/api/v1/wsfiles/ws-1/results/report.html',
-      '_blank',
-      'noopener,noreferrer',
-    );
+    await result.current.exportPdf();
+    expect(open).toHaveBeenCalledWith('/api/v1/wsfiles/ws-1/results/report.html', '_blank');
     expect(print).toHaveBeenCalled();
+    expect(toastMock).not.toHaveBeenCalled();
   });
 
-  it('shows the Cmd/Ctrl-P hint toast when print throws', () => {
+  it('falls back to print + hint when fetch rejects', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'));
     open.mockReturnValue({
       print: () => {
         throw new Error('blocked');
@@ -194,17 +318,40 @@ describe('useHtmlActions — file mode', () => {
     const { result } = renderHook(() =>
       useHtmlActions({ mode: 'file', workspaceId: 'ws-1', filePath: 'results/report.html', content: '<p>x</p>' }),
     );
-    result.current.exportPdf();
+    await result.current.exportPdf();
+    expect(open).toHaveBeenCalledWith('/api/v1/wsfiles/ws-1/results/report.html', '_blank');
     expect(toastMock).toHaveBeenCalledWith({ description: 'filePanel.pdfPrintHint' });
   });
 
-  it('shows the hint toast when the popup is blocked (no window)', () => {
+  it('shows the hint toast when the print popup is blocked (no window)', async () => {
+    fetchMock.mockResolvedValue(pdfResponse(false, 504));
     open.mockReturnValue(null);
     const { result } = renderHook(() =>
       useHtmlActions({ mode: 'file', workspaceId: 'ws-1', filePath: 'results/report.html', content: '<p>x</p>' }),
     );
-    result.current.exportPdf();
+    await result.current.exportPdf();
     expect(toastMock).toHaveBeenCalledWith({ description: 'filePanel.pdfPrintHint' });
+  });
+
+  it('ignores re-entry while a PDF render is in flight', async () => {
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    const { result } = renderHook(() =>
+      useHtmlActions({ mode: 'file', workspaceId: 'ws-1', filePath: 'results/report.html', content: '<p>x</p>' }),
+    );
+    const first = result.current.exportPdf();
+    result.current.exportPdf(); // re-entry, should be ignored
+    result.current.exportPdf();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    resolveFetch(pdfResponse(true));
+    await first;
+    // After the in-flight render settles, a new request is allowed.
+    await result.current.exportPdf();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('copies the file content to the clipboard', () => {
@@ -217,7 +364,7 @@ describe('useHtmlActions — file mode', () => {
     expect(writeText).toHaveBeenCalledWith('<p>source</p>');
   });
 
-  it('uses the servedUrl override (share page) for open-in-new-tab', () => {
+  it('uses the servedUrl override (share page) for open-in-new-tab with noopener', () => {
     const served = '/api/v1/public/shared/tok-1/files/serve/results/report.html';
     const { result } = renderHook(() =>
       useHtmlActions({

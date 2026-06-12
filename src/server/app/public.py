@@ -39,6 +39,7 @@ from src.server.app.workspace_files import (
     _is_system_path,
     _normalize_requested_path,
     _is_binary,
+    render_workspace_file_pdf,
     serve_workspace_file,
     DEFAULT_READ_LIMIT_LINES,
 )
@@ -459,6 +460,7 @@ async def serve_shared_file(
     share_token: str,
     path: str = Path(..., description="File path within the shared workspace."),
     inject: str | None = Query(None, description="Set to 'theme' to splice theme-sync into HTML."),
+    format: str | None = Query(None, description="Set to 'pdf' to render HTML as a PDF."),
 ) -> Response:
     """Serve a shared workspace file inline with a sandboxed CSP. Requires allow_files.
 
@@ -466,12 +468,17 @@ async def serve_shared_file(
     resolve under the same token prefix. Reuses the workspace file-serving core
     (MIME / traversal / redaction / DB-fallback / theme injection); the
     workspace UUID is resolved server-side and never appears in the URL.
+    ``?format=pdf`` renders HTML files via server-side Chromium over the same
+    internal wsfiles URL (the public URL never matters internally).
     """
     thread, workspace_id = await _get_shared_workspace_id(share_token, require_files=True)
 
     workspace = await db_get_workspace(workspace_id)
     if not workspace:
         raise HTTPException(status_code=404, detail="Not found")
+
+    if format == "pdf":
+        return await render_workspace_file_pdf(workspace_id, path, workspace=workspace)
 
     return await serve_workspace_file(
         workspace_id,

@@ -224,6 +224,8 @@ _WS_DB_GET_WS = "src.server.app.workspace_files.db_get_workspace"
 _WS_WORK_DIR = "src.server.app.workspace_files._get_work_dir"
 _WS_FP = "src.server.app.workspace_files.FilePersistenceService"
 _WS_VAULT = "src.server.app.workspace_files.get_vault_secrets_for_redaction"
+_RENDER = "src.server.services.pdf_render.render_workspace_pdf"
+_PDF_BASE = "http://127.0.0.1:8000"
 
 
 def _serve_text_record(text, mime="text/html"):
@@ -338,3 +340,113 @@ class TestServeSharedFile:
                 "/api/v1/public/shared/revoked-token/files/serve/results/report.html"
             )
         assert resp.status_code == 404
+
+
+class TestServeSharedFilePdf:
+    """?format=pdf over a share token — renderer is mocked (no Chromium in CI)."""
+
+    _INTERNAL_URL = f"{_PDF_BASE}/api/v1/wsfiles/{_WORKSPACE_ID}/results/report.html"
+    _SERVE_PREFIX = f"{_PDF_BASE}/api/v1/wsfiles/{_WORKSPACE_ID}/"
+
+    async def test_format_pdf_renders_html(self, public_client):
+        from src.server.services import pdf_render
+
+        html = "<html><body>shared report</body></html>"
+        render = AsyncMock(return_value=b"%PDF-1.7 shared")
+        with (
+            patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())),
+            patch(_PUBLIC_DB_GET_WS, AsyncMock(return_value=_make_workspace(status="stopped"))),
+            patch(_WS_DB_GET_WS, AsyncMock(return_value=_make_workspace(status="stopped"))),
+            patch(_WS_WORK_DIR, return_value="/home/workspace"),
+            patch(_WS_VAULT, AsyncMock(return_value={})),
+            patch(f"{_WS_FP}.get_file_content", AsyncMock(return_value=_serve_text_record(html))),
+            patch.object(pdf_render, "render_workspace_pdf", render),
+        ):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/serve/results/report.html",
+                params={"format": "pdf"},
+            )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.content == b"%PDF-1.7 shared"
+        cd = resp.headers["content-disposition"]
+        assert cd.startswith("attachment")
+        assert 'filename="report.pdf"' in cd
+        # The workspace UUID must never leak into response headers.
+        for value in resp.headers.values():
+            assert _WORKSPACE_ID not in value
+        render.assert_awaited_once_with(
+            self._INTERNAL_URL, workspace_serve_prefix=self._SERVE_PREFIX
+        )
+
+    async def test_format_pdf_not_permitted_returns_403(self, public_client):
+        thread = _make_thread(share_permissions={"allow_files": False})
+        render = AsyncMock()
+        with (
+            patch(_THREAD_BY_TOKEN, AsyncMock(return_value=thread)),
+            patch(_RENDER, render),
+        ):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/serve/results/report.html",
+                params={"format": "pdf"},
+            )
+        assert resp.status_code == 403
+        render.assert_not_awaited()
+
+    async def test_format_pdf_revoked_returns_404(self, public_client):
+        render = AsyncMock()
+        with patch(_THREAD_BY_TOKEN, AsyncMock(return_value=None)), patch(_RENDER, render):
+            resp = await public_client.get(
+                "/api/v1/public/shared/revoked-token/files/serve/results/report.html",
+                params={"format": "pdf"},
+            )
+        assert resp.status_code == 404
+        render.assert_not_awaited()
+
+    async def test_format_pdf_on_non_html_returns_404(self, public_client):
+        css = "body{color:red}"
+        render = AsyncMock()
+        with (
+            patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())),
+            patch(_PUBLIC_DB_GET_WS, AsyncMock(return_value=_make_workspace(status="stopped"))),
+            patch(_WS_DB_GET_WS, AsyncMock(return_value=_make_workspace(status="stopped"))),
+            patch(_WS_WORK_DIR, return_value="/home/workspace"),
+            patch(_WS_VAULT, AsyncMock(return_value={})),
+            patch(
+                f"{_WS_FP}.get_file_content",
+                AsyncMock(return_value=_serve_text_record(css, mime="text/css")),
+            ),
+            patch(_RENDER, render),
+        ):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/serve/results/style.css",
+                params={"format": "pdf"},
+            )
+        assert resp.status_code == 404
+        render.assert_not_awaited()
+
+    async def test_format_pdf_render_errors_map_to_status(self, public_client):
+        from src.server.services import pdf_render
+
+        html = "<html><body>x</body></html>"
+        cases = [
+            (pdf_render.PdfRenderUnavailable("no chromium"), 501),
+            (pdf_render.PdfRenderTimeout("slow"), 504),
+            (pdf_render.PdfRenderError("boom"), 500),
+        ]
+        for exc, status in cases:
+            render = AsyncMock(side_effect=exc)
+            with (
+                patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())),
+                patch(_PUBLIC_DB_GET_WS, AsyncMock(return_value=_make_workspace(status="stopped"))),
+                patch(_WS_DB_GET_WS, AsyncMock(return_value=_make_workspace(status="stopped"))),
+                patch(_WS_WORK_DIR, return_value="/home/workspace"),
+                patch(_WS_VAULT, AsyncMock(return_value={})),
+                patch(f"{_WS_FP}.get_file_content", AsyncMock(return_value=_serve_text_record(html))),
+                patch.object(pdf_render, "render_workspace_pdf", render),
+            ):
+                resp = await public_client.get(
+                    f"/api/v1/public/shared/{_SHARE_TOKEN}/files/serve/results/report.html",
+                    params={"format": "pdf"},
+                )
+            assert resp.status_code == status, exc

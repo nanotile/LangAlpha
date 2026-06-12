@@ -37,6 +37,7 @@ from charset_normalizer import from_bytes
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from src.config.env import PDF_RENDER_INTERNAL_BASE
 from src.server.utils.api import CurrentUserId, require_workspace_owner
 from src.server.utils.http_headers import content_disposition
 from fastapi.responses import Response
@@ -1317,17 +1318,88 @@ async def serve_workspace_file(
     return Response(content=content, media_type=content_type, headers=headers)
 
 
+async def render_workspace_file_pdf(
+    workspace_id: str,
+    path: str,
+    *,
+    workspace: dict[str, Any] | None = None,
+) -> Response:
+    """Render a workspace HTML file to PDF via headless Chromium.
+
+    Pre-validates the file exists and is HTML (same uniform 404 posture as the
+    inline serve, so chromium never spins on garbage), then renders the byte-
+    faithful internal wsfiles URL (no theme injection) under an SSRF-gated
+    browser. Renderer failures map to 501/504/500 — intentionally NOT 404,
+    since the file exists and only the converter failed.
+    """
+    if _has_traversal(path):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if workspace is None:
+        try:
+            workspace = await db_get_workspace(workspace_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Not found") from None
+    if not workspace or _is_flash_workspace(workspace):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    work_dir = _get_work_dir()
+    normalized_path = _normalize_requested_path(path, work_dir)
+    if not normalized_path or _is_always_hidden_path(normalized_path):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Cheap pre-validation: resolve bytes + content type and require HTML.
+    resolved = await _resolve_serve_bytes(workspace, workspace_id, normalized_path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    _content, content_type = resolved
+    if not _is_html_content_type(content_type):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    from src.server.services import pdf_render
+
+    base = PDF_RENDER_INTERNAL_BASE.rstrip("/")
+    internal_url = f"{base}/api/v1/wsfiles/{workspace_id}/{normalized_path}"
+    serve_prefix = f"{base}/api/v1/wsfiles/{workspace_id}/"
+    try:
+        pdf_bytes = await pdf_render.render_workspace_pdf(
+            internal_url, workspace_serve_prefix=serve_prefix
+        )
+    except pdf_render.PdfRenderUnavailable:
+        raise HTTPException(status_code=501, detail="PDF rendering not available")
+    except pdf_render.PdfRenderTimeout:
+        raise HTTPException(status_code=504, detail="PDF rendering timed out")
+    except pdf_render.PdfRenderError:
+        logger.exception("PDF render failed for workspace file")
+        raise HTTPException(status_code=500, detail="PDF rendering failed")
+
+    stem = normalized_path.rsplit("/", 1)[-1].rsplit(".", 1)[0] or "document"
+    headers = {
+        "Content-Disposition": content_disposition(
+            f"{stem}.pdf", disposition="attachment"
+        ),
+        "Cache-Control": "private, max-age=60",
+    }
+    _record_fs_bytes("pdf", len(pdf_bytes))
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+
+
 @wsfiles_router.get("/wsfiles/{workspace_id}/{path:path}")
 async def serve_workspace_file_endpoint(
     workspace_id: str,
     path: str,
     inject: str | None = Query(None, description="Set to 'theme' to splice theme-sync into HTML."),
+    format: str | None = Query(None, description="Set to 'pdf' to render HTML as a PDF."),
 ) -> Response:
     """Serve a workspace file by path with sandboxed CSP (unauthenticated).
 
     Workspace UUID is the credential; uniform 404 for unknown workspace,
     missing file, or traversal. ``?inject=theme`` adds theme-sync to HTML only.
+    ``?format=pdf`` renders HTML files to PDF server-side; other values serve
+    normally.
     """
+    if format == "pdf":
+        return await render_workspace_file_pdf(workspace_id, path)
     return await serve_workspace_file(
         workspace_id, path, inject_theme=(inject == "theme")
     )

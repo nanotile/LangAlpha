@@ -2046,6 +2046,9 @@ observability = [
     { name = "opentelemetry-instrumentation-redis" },
     { name = "opentelemetry-sdk" },
 ]
+pdf = [
+    { name = "playwright" },
+]
 test = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2104,6 +2107,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "pdfplumber", specifier = ">=0.10.0" },
     { name = "playwright" },
+    { name = "playwright", marker = "extra == 'pdf'", specifier = ">=1.49" },
     { name = "plotly" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2.9" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
@@ -2132,7 +2136,7 @@ requires-dist = [
     { name = "yfinance", specifier = ">=1.2.0" },
     { name = "youtube-transcript-api", specifier = ">=1.0.0" },
 ]
-provides-extras = ["dev", "test", "observability"]
+provides-extras = ["dev", "test", "observability", "pdf"]
 
 [package.metadata.requires-dev]
 dev = [
