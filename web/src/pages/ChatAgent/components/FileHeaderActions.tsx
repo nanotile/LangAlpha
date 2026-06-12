@@ -15,6 +15,10 @@ export function isMarkdownFile(filePath: string, mime: string | null): boolean {
   return getFileExtension(filePath.split('/').pop() || '') === 'md' || (mime?.includes('markdown') ?? false);
 }
 
+export function isHtmlFile(filePath: string): boolean {
+  return ['html', 'htm'].includes(getFileExtension(filePath.split('/').pop() || ''));
+}
+
 export function isTextMime(mime: string | null): boolean {
   if (!mime) return false;
   if (mime.startsWith('text/')) return true;
@@ -147,6 +151,7 @@ function FileHeaderActions({
   // --- View mode ---
 
   const isMd = isMarkdownFile(selectedFile, fileMime);
+  const isHtml = isHtmlFile(selectedFile);
   const isText = isTextMime(fileMime);
 
   const renderDropdownItems = () => {
@@ -163,6 +168,16 @@ function FileHeaderActions({
             {t('filePanel.downloadAsMarkdown')}
           </DropdownMenuItem>
         </>
+      );
+    }
+
+    if (isHtml) {
+      // HTML file: Download only — rich actions (open/PDF/copy) live in the HtmlViewer toolbar.
+      return (
+        <DropdownMenuItem onSelect={() => triggerDownloadFn(workspaceId, selectedFile).catch((err: unknown) => console.error('[FileHeaderActions] Download failed:', err))}>
+          <Download className="h-3.5 w-3.5" />
+          {t('filePanel.download')}
+        </DropdownMenuItem>
       );
     }
 

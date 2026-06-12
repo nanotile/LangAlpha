@@ -1,6 +1,14 @@
 .inline-widget-container {
+  position: relative;
   overflow: hidden;
   margin: 8px 0;
+}
+
+/* Reveal the hover action bar (.html-action-bar-overlay) on container hover. */
+.inline-widget-container:hover .html-action-bar-overlay,
+.inline-widget-container:focus-within .html-action-bar-overlay {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .inline-widget-frame {

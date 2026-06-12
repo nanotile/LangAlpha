@@ -5,6 +5,7 @@ import '@testing-library/jest-dom';
 import FileHeaderActions, {
   getFileExtension,
   isMarkdownFile,
+  isHtmlFile,
   isTextMime,
 } from '../FileHeaderActions';
 
@@ -92,6 +93,18 @@ describe('isMarkdownFile', () => {
 
   it('returns false for non-markdown file without markdown mime', () => {
     expect(isMarkdownFile('data.csv', 'text/csv')).toBe(false);
+  });
+});
+
+describe('isHtmlFile', () => {
+  it('returns true for .html and .htm files', () => {
+    expect(isHtmlFile('report.html')).toBe(true);
+    expect(isHtmlFile('results/page.htm')).toBe(true);
+  });
+
+  it('returns false for non-HTML files', () => {
+    expect(isHtmlFile('report.md')).toBe(false);
+    expect(isHtmlFile('data.json')).toBe(false);
   });
 });
 
@@ -207,6 +220,19 @@ describe('FileHeaderActions', () => {
     expect(
       screen.getByText('filePanel.copyToClipboard'),
     ).toBeInTheDocument();
+  });
+
+  it('renders only Download for HTML file (rich actions live in the viewer)', () => {
+    render(
+      <FileHeaderActions
+        {...defaultProps}
+        selectedFile="results/report.html"
+        fileMime="text/html"
+      />,
+    );
+    expect(screen.getByText('filePanel.download')).toBeInTheDocument();
+    expect(screen.queryByText('filePanel.copyToClipboard')).not.toBeInTheDocument();
+    expect(screen.queryByText('filePanel.downloadAsPdf')).not.toBeInTheDocument();
   });
 
   it('renders only Download for binary file', () => {

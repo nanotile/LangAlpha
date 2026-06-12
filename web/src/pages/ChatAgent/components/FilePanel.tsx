@@ -1164,6 +1164,26 @@ function FilePanel({
       return;
     }
 
+    // HTML files: read the full source (the viewer renders via the served URL,
+    // but the Source tab needs untruncated content — the paginated read caps at 20k lines).
+    if (['html', 'htm'].includes(ext)) {
+      setSelectedFile(filePath);
+      setFileLoading(true);
+      try {
+        const data = await readFileFullFn(workspaceId, filePath);
+        setFileContent(data.content || '');
+        setFileMime('text/html');
+      } catch (err) {
+        console.error('[FilePanel] Failed to read HTML file:', err);
+        setFileError(categorizeFileError(err, wsData?.status));
+        setFileContent(null);
+        setFileMime(null);
+      } finally {
+        setFileLoading(false);
+      }
+      return;
+    }
+
     // Text files - read content
     setSelectedFile(filePath);
     setFileLoading(true);
@@ -1743,7 +1763,13 @@ function FilePanel({
             ) : ['html', 'htm'].includes(getFileExtension(selectedFile)) ? (
               <Suspense fallback={<DocumentLoadingFallback />}>
                 <DocumentErrorBoundary fallback={<DocumentErrorFallback onDownload={() => triggerDownloadFn(workspaceId, selectedFile).catch((err: unknown) => console.error('[FilePanel] Download failed:', err))} />}>
-                  <HtmlViewer content={fileContent ?? ''} />
+                  <HtmlViewer
+                    content={fileContent ?? ''}
+                    fileName={fileName}
+                    workspaceId={workspaceId}
+                    filePath={selectedFile}
+                    onTriggerDownload={() => triggerDownloadFn(workspaceId, selectedFile).catch((err: unknown) => console.error('[FilePanel] Download failed:', err))}
+                  />
                 </DocumentErrorBoundary>
               </Suspense>
             ) : isEditing ? (

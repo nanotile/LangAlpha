@@ -315,6 +315,8 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   const { preferences } = usePreferences();
   const queryClient = useQueryClient();
   const initialMessageSentRef = useRef(false);
+  // Guards one-shot consumption of the ?file= deep link (report share / copy link).
+  const fileDeepLinkConsumedRef = useRef(false);
   // Determine agent mode: flash workspaces use flash mode, otherwise ptc
   const state = location.state as LocationState | null;
   const [agentMode, setAgentMode] = useState(state?.agentMode || 'ptc');
@@ -1149,6 +1151,25 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   // file-panel handoffs) that still use the older name. Pure identity — the
   // unified router does the path-aware classification on every call.
   const handleOpenFileFromChat = handleOpenAgentArtifactFromChat;
+
+  // One-shot ?file= deep link: opens the file panel targeting that file. Gated
+  // on isActive so only the visible ChatView consumes it (ChatAgent keeps cached
+  // hidden instances), and on workspaceId so the panel has something to read.
+  // The param is stripped after consuming so it can't re-fire on re-render.
+  useEffect(() => {
+    if (!isActive || !workspaceId || fileDeepLinkConsumedRef.current) return;
+    const params = new URLSearchParams(location.search);
+    const raw = params.get('file');
+    if (!raw) return;
+    fileDeepLinkConsumedRef.current = true;
+    handleOpenFileFromChat(decodeURIComponent(raw));
+    params.delete('file');
+    const search = params.toString();
+    navigate(
+      { pathname: location.pathname, search: search ? `?${search}` : '' },
+      { replace: true, state: location.state },
+    );
+  }, [isActive, workspaceId, location.search, location.pathname, location.state, navigate, handleOpenFileFromChat]);
 
   // Open file panel filtered to a specific directory. Clears every other
   // target first — symmetric with handleOpenAgentArtifactFromChat — so a
