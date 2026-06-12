@@ -62,9 +62,6 @@ _FORBIDDEN_KEYS = ("vault_blueprints", "source")
 # workspace servers (only ``${vault:NAME}`` does), so fail fast at the API.
 _BARE_ENV_RE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 
-_TRANSPORTS = ("stdio", "sse", "http")
-_EXPOSURE_MODES = ("summary", "detailed")
-
 
 # ---------------------------------------------------------------------------
 # Value-level validators (shared by env and headers)

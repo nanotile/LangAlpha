@@ -42,6 +42,7 @@ from ptc_agent.core.sandbox.runtime import (
 from ..mcp_registry import MCPRegistry
 from ..mcp_sanitize import (
     discovery_affecting_payload,
+    is_user_server,
     sanitize_tool_name,
 )
 from ..tool_generator import ToolFunctionGenerator
@@ -217,19 +218,11 @@ class PTCSandbox:
 
     def _builtin_servers(self) -> list:
         """Built-in servers only (``source != 'workspace'``) from the effective set."""
-        return [
-            s
-            for s in self.config.mcp.servers
-            if getattr(s, "source", "builtin") != "workspace"
-        ]
+        return [s for s in self.config.mcp.servers if not is_user_server(s)]
 
     def _user_servers(self) -> list:
         """User-configured servers (``source == 'workspace'``) from the effective set."""
-        return [
-            s
-            for s in self.config.mcp.servers
-            if getattr(s, "source", "builtin") == "workspace"
-        ]
+        return [s for s in self.config.mcp.servers if is_user_server(s)]
 
     async def _wait_ready(self) -> None:
         """Wait for sandbox to be ready. Call at start of methods needing sandbox."""

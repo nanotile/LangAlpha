@@ -10,6 +10,7 @@ from ptc_agent.config.core import MCPServerConfig
 from .mcp_registry import MCPToolInfo
 from .mcp_sanitize import (
     discovery_should_use_secrets,
+    is_user_server,
     sanitize_tool_name,
     sanitize_tool_set,
     sanitize_tool_text,
@@ -736,13 +737,11 @@ def _resolve_sse(config, server_name, *, discovery=False):
         # its own declared values). The vault machinery is emitted only when at
         # least one workspace server is present, so a builtin-only config yields
         # the byte-identical module it always has (no `vault` references appear).
-        has_workspace = any(
-            getattr(s, "source", "builtin") == "workspace" for s in server_configs
-        )
+        has_workspace = any(is_user_server(s) for s in server_configs)
 
         servers_dict = "{\n"
         for server in server_configs:
-            is_workspace = getattr(server, "source", "builtin") == "workspace"
+            is_workspace = is_user_server(server)
             if server.transport in ("sse", "http"):
                 url = server.url or ""
                 if is_workspace:

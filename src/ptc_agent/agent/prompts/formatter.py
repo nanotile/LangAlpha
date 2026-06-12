@@ -7,7 +7,11 @@ and are kept in Python rather than templates.
 import structlog
 from typing import Any
 
-from ptc_agent.core.mcp_sanitize import sanitize_tool_name, sanitize_tool_text
+from ptc_agent.core.mcp_sanitize import (
+    is_user_server,
+    sanitize_tool_name,
+    sanitize_tool_text,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -33,7 +37,7 @@ WORKSPACE_DETAILED_MAX_CHARS = 8000
 
 def _is_workspace_source(config: Any) -> bool:
     """True when ``config`` is an untrusted user-provided (workspace) server."""
-    return bool(config) and getattr(config, "source", "builtin") == "workspace"
+    return bool(config) and is_user_server(config)
 
 
 def _safe_tool_name(name: Any, *, workspace: bool) -> str:

@@ -424,6 +424,11 @@ async def delete_workspace_server(workspace_id: str, name: str) -> bool:
                 )
                 if cur.rowcount == 0:
                     return False
+                await cur.execute(
+                    "DELETE FROM workspace_mcp_tool_schemas "
+                    "WHERE workspace_id = %s AND server_name = %s",
+                    (workspace_id, name),
+                )
                 await _bump_version(cur, workspace_id)
                 logger.info(
                     f"[mcp_db] delete_workspace_server workspace_id={workspace_id} "
@@ -473,30 +478,44 @@ async def upsert_tool_schemas(
     error: str = "",
     observed_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Insert or replace a discovery snapshot for one server at one config hash."""
+    """Insert or replace a discovery snapshot for one server at one config hash.
+
+    Snapshots for the same server at OTHER config hashes are deleted in the
+    same transaction — only the current config's snapshot is kept, so config
+    iteration doesn't accumulate dead rows.
+    """
     async with get_db_connection() as conn:
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                """
-                INSERT INTO workspace_mcp_tool_schemas
-                    (workspace_id, server_name, config_hash, tools, status,
-                     error, observed_meta, discovered_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (workspace_id, server_name, config_hash) DO UPDATE
-                    SET tools = EXCLUDED.tools,
-                        status = EXCLUDED.status,
-                        error = EXCLUDED.error,
-                        observed_meta = EXCLUDED.observed_meta,
-                        discovered_at = NOW()
-                RETURNING workspace_id, server_name, config_hash, tools, status,
-                          error, observed_meta, discovered_at
-                """,
-                (
-                    workspace_id, server_name, config_hash, Json(tools or []),
-                    status, error, Json(observed_meta or {}),
-                ),
-            )
-            return _schema_row_to_dict(await cur.fetchone())
+        async with conn.transaction():
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    DELETE FROM workspace_mcp_tool_schemas
+                    WHERE workspace_id = %s AND server_name = %s
+                      AND config_hash <> %s
+                    """,
+                    (workspace_id, server_name, config_hash),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO workspace_mcp_tool_schemas
+                        (workspace_id, server_name, config_hash, tools, status,
+                         error, observed_meta, discovered_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (workspace_id, server_name, config_hash) DO UPDATE
+                        SET tools = EXCLUDED.tools,
+                            status = EXCLUDED.status,
+                            error = EXCLUDED.error,
+                            observed_meta = EXCLUDED.observed_meta,
+                            discovered_at = NOW()
+                    RETURNING workspace_id, server_name, config_hash, tools, status,
+                              error, observed_meta, discovered_at
+                    """,
+                    (
+                        workspace_id, server_name, config_hash, Json(tools or []),
+                        status, error, Json(observed_meta or {}),
+                    ),
+                )
+                return _schema_row_to_dict(await cur.fetchone())
 
 
 # ---------------------------------------------------------------------------

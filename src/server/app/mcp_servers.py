@@ -177,6 +177,46 @@ def _sandbox_warming(workspace: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _effective_server(
+    srv: Any,
+    *,
+    origin: str,
+    enabled: bool,
+    status: str,
+    config_version: int,
+    error: str = "",
+    tools: list[ToolSummary] | None = None,
+    missing_secrets: list[str] | None = None,
+    env_refs: list[str] | None = None,
+    header_refs: list[str] | None = None,
+) -> EffectiveServer:
+    """Build one effective-list row; editable/deletable derive from origin."""
+    tools = tools or []
+    return EffectiveServer(
+        name=srv.name,
+        origin=origin,
+        transport=srv.transport,
+        enabled=enabled,
+        editable=(origin == "workspace"),
+        deletable=(origin == "workspace"),
+        status=status,
+        error=error,
+        tool_count=len(tools),
+        tools=tools,
+        missing_secrets=missing_secrets or [],
+        env_refs=env_refs or [],
+        header_refs=header_refs or [],
+        description=srv.description or "",
+        instruction=srv.instruction or "",
+        tool_exposure_mode=srv.tool_exposure_mode or "summary",
+        discovery_uses_secrets=bool(getattr(srv, "discovery_uses_secrets", False)),
+        command=srv.command,
+        args=list(srv.args or []),
+        url=srv.url,
+        config_version=config_version,
+    )
+
+
 @router.get("/{workspace_id}/mcp/servers")
 @handle_api_exceptions("list workspace MCP servers", logger)
 async def list_servers(workspace_id: str, user_id: CurrentUserId) -> EffectiveServerList:
@@ -218,29 +258,16 @@ async def list_servers(workspace_id: str, user_id: CurrentUserId) -> EffectiveSe
         )
         tools = _tools_from_schema(schema_row)
         servers.append(
-            EffectiveServer(
-                name=srv.name,
+            _effective_server(
+                srv,
                 origin=origin,
-                transport=srv.transport,
                 enabled=srv.enabled,
-                editable=(origin == "workspace"),
-                deletable=(origin == "workspace"),
                 status=status,
                 error=error,
-                tool_count=len(tools),
                 tools=tools,
                 missing_secrets=missing,
                 env_refs=env_refs,
                 header_refs=header_refs,
-                description=srv.description or "",
-                instruction=srv.instruction or "",
-                tool_exposure_mode=srv.tool_exposure_mode or "summary",
-                discovery_uses_secrets=bool(
-                    getattr(srv, "discovery_uses_secrets", False)
-                ),
-                command=srv.command,
-                args=list(srv.args or []),
-                url=srv.url,
                 config_version=resolved.version,
             )
         )
@@ -251,26 +278,11 @@ async def list_servers(workspace_id: str, user_id: CurrentUserId) -> EffectiveSe
         if srv.name not in resolved.disabled_builtin_names:
             continue
         servers.append(
-            EffectiveServer(
-                name=srv.name,
+            _effective_server(
+                srv,
                 origin="builtin",
-                transport=srv.transport,
                 enabled=False,
-                editable=False,
-                deletable=False,
                 status="disabled",
-                error="",
-                tool_count=0,
-                tools=[],
-                missing_secrets=[],
-                env_refs=[],
-                header_refs=[],
-                description=srv.description or "",
-                instruction=srv.instruction or "",
-                tool_exposure_mode=srv.tool_exposure_mode or "summary",
-                command=srv.command,
-                args=list(srv.args or []),
-                url=srv.url,
                 config_version=resolved.version,
             )
         )
@@ -283,29 +295,13 @@ async def list_servers(workspace_id: str, user_id: CurrentUserId) -> EffectiveSe
         env_refs = collect_vault_refs(dict(srv.env or {}))
         header_refs = collect_vault_refs(dict(srv.headers or {}))
         servers.append(
-            EffectiveServer(
-                name=srv.name,
+            _effective_server(
+                srv,
                 origin="workspace",
-                transport=srv.transport,
                 enabled=False,
-                editable=True,
-                deletable=True,
                 status="disabled",
-                error="",
-                tool_count=0,
-                tools=[],
-                missing_secrets=[],
                 env_refs=env_refs,
                 header_refs=header_refs,
-                description=srv.description or "",
-                instruction=srv.instruction or "",
-                tool_exposure_mode=srv.tool_exposure_mode or "summary",
-                discovery_uses_secrets=bool(
-                    getattr(srv, "discovery_uses_secrets", False)
-                ),
-                command=srv.command,
-                args=list(srv.args or []),
-                url=srv.url,
                 config_version=resolved.version,
             )
         )
@@ -890,6 +886,8 @@ async def discover_server(
 
 # Strong refs to in-flight proactive-apply tasks so they aren't GC'd mid-run.
 _proactive_apply_tasks: set[asyncio.Task] = set()
+_proactive_apply_pending: dict[str, asyncio.Task] = {}
+_PROACTIVE_APPLY_SETTLE_S = 1.5
 
 
 def _schedule_proactive_apply(workspace_id: str, user_id: str) -> None:
@@ -900,16 +898,37 @@ def _schedule_proactive_apply(workspace_id: str, user_id: str) -> None:
     new version — warming (cold-starting) the sandbox if it isn't running yet —
     so the change is discovered and live before the user's next turn (no
     surprise). Best-effort: any failure falls back to the next-message apply.
+
+    Mutations within the settle window coalesce into one apply: a newer
+    mutation cancels a still-waiting sleeper, never an in-flight apply.
     """
     try:
         wm = WorkspaceManager.get_instance()
     except Exception:
         return
-    task = asyncio.create_task(
-        wm.proactively_apply_mcp_config(workspace_id, user_id)
-    )
+
+    pending = _proactive_apply_pending.get(workspace_id)
+    if pending is not None and not pending.done():
+        pending.cancel()
+
+    async def _settle_then_apply() -> None:
+        await asyncio.sleep(_PROACTIVE_APPLY_SETTLE_S)
+        # Past the settle window: deregister so newer mutations schedule a
+        # fresh apply instead of cancelling this one mid-flight.
+        if _proactive_apply_pending.get(workspace_id) is asyncio.current_task():
+            _proactive_apply_pending.pop(workspace_id, None)
+        await wm.proactively_apply_mcp_config(workspace_id, user_id)
+
+    task = asyncio.create_task(_settle_then_apply())
+    _proactive_apply_pending[workspace_id] = task
     _proactive_apply_tasks.add(task)
-    task.add_done_callback(_proactive_apply_tasks.discard)
+
+    def _cleanup(t: asyncio.Task) -> None:
+        _proactive_apply_tasks.discard(t)
+        if _proactive_apply_pending.get(workspace_id) is t:
+            _proactive_apply_pending.pop(workspace_id, None)
+
+    task.add_done_callback(_cleanup)
 
 
 def _get_live_sandbox(workspace_id: str, workspace: dict) -> Any | None:

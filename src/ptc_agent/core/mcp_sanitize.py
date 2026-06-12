@@ -48,6 +48,15 @@ def vault_refs(value: str) -> list[str]:
     return VAULT_REF_RE.findall(value or "")
 
 
+def is_user_server(server) -> bool:
+    """True for user-configured workspace servers (``source == 'workspace'``).
+
+    The single definition of the trust-boundary predicate — built-ins (no
+    ``source`` attr, or ``'builtin'``) are trusted; workspace servers are not.
+    """
+    return getattr(server, "source", "builtin") == "workspace"
+
+
 def discovery_should_use_secrets(server) -> bool:
     """Whether tool discovery should resolve vault secrets for a server.
 
@@ -60,9 +69,7 @@ def discovery_should_use_secrets(server) -> bool:
     """
     if bool(getattr(server, "discovery_uses_secrets", False)):
         return True
-    if getattr(server, "source", "builtin") == "workspace" and getattr(
-        server, "transport", None
-    ) in ("sse", "http"):
+    if is_user_server(server) and getattr(server, "transport", None) in ("sse", "http"):
         headers = getattr(server, "headers", {}) or {}
         return any(VAULT_REF_RE.search(str(v)) for v in headers.values())
     return False

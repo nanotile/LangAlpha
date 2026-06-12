@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import httpx
 
 from ptc_agent.config import AgentConfig
+from ptc_agent.core.mcp_sanitize import is_user_server
 from ptc_agent.core.sandbox.runtime import SandboxGoneError, SandboxTransientError
 from ptc_agent.core.session import Session, SessionManager
 
@@ -380,10 +381,7 @@ class WorkspaceManager:
         session.config.mcp.servers = list(resolved.servers)
 
         # User servers (source='workspace') + their ok-status cached schemas.
-        user_servers = [
-            s for s in resolved.servers
-            if getattr(s, "source", "builtin") == "workspace"
-        ]
+        user_servers = [s for s in resolved.servers if is_user_server(s)]
         tool_schemas: dict[str, list[dict]] = {}
         if user_servers:
             from src.server.database.mcp_servers import get_tool_schemas
@@ -442,8 +440,7 @@ class WorkspaceManager:
                     present_with_tools.add(name)
         return [
             s for s in resolved.servers
-            if getattr(s, "source", "builtin") == "workspace"
-            and s.name not in present_with_tools
+            if is_user_server(s) and s.name not in present_with_tools
         ]
 
     def _kick_mcp_discovery(
