@@ -1258,7 +1258,7 @@
     "exportLoadError": "Could not load full content. Export may be incomplete.",
     "saveAsPdf": "Save as PDF",
     "pdfOptions": "PDF options",
-    "pdfBranding": "langalpha footer",
+    "pdfBranding": "Footer",
     "pdfPageNumbers": "Page numbers",
     "pdfScale": "Scale",
     "openInNewTab": "Open in new tab",

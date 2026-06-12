@@ -1258,7 +1258,7 @@
     "exportLoadError": "无法加载完整内容，导出可能不完整。",
     "saveAsPdf": "导出为 PDF",
     "pdfOptions": "PDF 选项",
-    "pdfBranding": "langalpha 页脚",
+    "pdfBranding": "页脚",
     "pdfPageNumbers": "页码",
     "pdfScale": "缩放",
     "openInNewTab": "在新标签页打开",

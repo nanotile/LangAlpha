@@ -468,7 +468,7 @@ async def serve_shared_file(
         False, description="PDF only: draw an 'N / total' footer in the page margin."
     ),
     branding: bool = Query(
-        True, description="PDF only: stamp 'langalpha · <date>' in the footer."
+        True, description="PDF only: stamp 'LangAlpha · <date>' in the footer."
     ),
 ) -> Response:
     """Serve a shared workspace file inline with a sandboxed CSP. Requires allow_files.
