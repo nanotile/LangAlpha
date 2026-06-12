@@ -21,6 +21,20 @@ async def _version(workspace_id: str) -> int:
     return int(ws["mcp_config_version"])
 
 
+async def _schema_raw_count(workspace_id: str, server_name: str) -> int:
+    """Raw row count for one server's snapshots (bypasses DISTINCT ON)."""
+    from src.server.database.conversation import get_db_connection
+
+    async with get_db_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT COUNT(*) AS n FROM workspace_mcp_tool_schemas "
+                "WHERE workspace_id = %s AND server_name = %s",
+                (workspace_id, server_name),
+            )
+            return int((await cur.fetchone())["n"])
+
+
 # ---------------------------------------------------------------------------
 # Catalog CRUD
 # ---------------------------------------------------------------------------
@@ -337,9 +351,10 @@ class TestSchemaCache:
         assert rows["beta"]["status"] == "pending"
         assert rows["beta"]["config_hash"] == "hash-beta"
 
-    async def test_distinct_hash_is_a_distinct_entry_latest_wins(self, seed_workspace, patched_get_db_connection):
-        """A config change (new hash) for the same server is a distinct cache
-        row; get surfaces the most recently discovered one."""
+    async def test_new_hash_replaces_and_purges_stale_rows(self, seed_workspace, patched_get_db_connection):
+        """A config change (new hash) replaces the server's snapshot AND
+        garbage-collects rows at older hashes, so config iteration doesn't
+        accumulate dead rows."""
         from src.server.database.mcp_servers import (
             get_tool_schemas,
             upsert_tool_schemas,
@@ -347,12 +362,35 @@ class TestSchemaCache:
 
         wid = seed_workspace["workspace_id"]
         await upsert_tool_schemas(wid, "acme", "hash-old", status="ok")
-        # A new config ⇒ new hash ⇒ a separate row, and it's the latest.
+        await upsert_tool_schemas(wid, "acme", "hash-mid", status="ok")
         await upsert_tool_schemas(wid, "acme", "hash-new", status="pending")
 
         rows = await get_tool_schemas(wid)
         assert len(rows) == 1
         assert rows[0]["config_hash"] == "hash-new" and rows[0]["status"] == "pending"
+        # The stale hash-old / hash-mid rows are physically gone, not just shadowed.
+        assert await _schema_raw_count(wid, "acme") == 1
+
+    async def test_delete_server_purges_schema_rows(self, seed_workspace, patched_get_db_connection):
+        """Deleting a workspace server removes its discovery snapshots too."""
+        from src.server.database.mcp_servers import (
+            delete_workspace_server,
+            get_tool_schemas,
+            insert_workspace_server,
+            upsert_tool_schemas,
+        )
+
+        wid = seed_workspace["workspace_id"]
+        await insert_workspace_server(
+            wid, "acme", config={"transport": "stdio", "command": "npx"},
+        )
+        await upsert_tool_schemas(wid, "acme", "hash-1", status="ok")
+        await upsert_tool_schemas(wid, "beta", "hash-b", status="ok")
+
+        assert await delete_workspace_server(wid, "acme") is True
+        names = {r["server_name"] for r in await get_tool_schemas(wid)}
+        assert names == {"beta"}
+        assert await _schema_raw_count(wid, "acme") == 0
 
     async def test_upsert_replaces_same_key(self, seed_workspace, patched_get_db_connection):
         from src.server.database.mcp_servers import (

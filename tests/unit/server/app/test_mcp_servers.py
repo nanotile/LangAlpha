@@ -492,6 +492,32 @@ async def test_mutation_schedules_proactive_apply(client):
 
 
 @pytest.mark.asyncio
+async def test_proactive_apply_coalesces_burst_mutations(monkeypatch):
+    """Mutations inside the settle window collapse into ONE apply; a mutation
+    after the window schedules a fresh one."""
+    import asyncio as aio
+
+    from src.server.app import mcp_servers as mod
+
+    wm = MagicMock()
+    wm.proactively_apply_mcp_config = AsyncMock()
+    monkeypatch.setattr(
+        mod.WorkspaceManager, "get_instance", classmethod(lambda cls: wm)
+    )
+    monkeypatch.setattr(mod, "_PROACTIVE_APPLY_SETTLE_S", 0.02)
+
+    for _ in range(5):
+        mod._schedule_proactive_apply("ws-1", "user-1")
+    await aio.sleep(0.1)
+    assert wm.proactively_apply_mcp_config.await_count == 1
+
+    mod._schedule_proactive_apply("ws-1", "user-1")
+    await aio.sleep(0.1)
+    assert wm.proactively_apply_mcp_config.await_count == 2
+    assert "ws-1" not in mod._proactive_apply_pending
+
+
+@pytest.mark.asyncio
 async def test_add_server_rejects_bash_command(client):
     ws = _ws()
     base = _agent_config([])

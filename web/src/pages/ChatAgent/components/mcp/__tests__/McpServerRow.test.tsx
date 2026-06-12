@@ -94,9 +94,11 @@ describe('McpServerRow — origin badge + base render', () => {
 describe('McpServerRow — enabled toggle', () => {
   it('toggles via the switch (interactive for builtins too)', () => {
     const h = handlers();
-    render(<McpServerRow server={makeServer({ origin: 'builtin', editable: false, deletable: false })} {...h} />);
+    const server = makeServer({ origin: 'builtin', editable: false, deletable: false });
+    render(<McpServerRow server={server} {...h} />);
     fireEvent.click(screen.getByRole('switch'));
-    expect(h.onToggle).toHaveBeenCalledWith(false);
+    // Handlers receive the row's own server (stable-prop pattern) + the new value.
+    expect(h.onToggle).toHaveBeenCalledWith(server, false);
   });
 });
 
@@ -146,11 +148,12 @@ describe('McpServerRow — kebab menu (builtins restricted)', () => {
 
   it('keeps a disabled workspace server re-enableable but ungates only the toggle', () => {
     const h = handlers();
-    render(<McpServerRow server={makeServer({ enabled: false, status: 'disabled' })} {...h} />);
+    const server = makeServer({ enabled: false, status: 'disabled' });
+    render(<McpServerRow server={server} {...h} />);
 
     // The toggle is the way back on.
     fireEvent.click(screen.getByRole('switch'));
-    expect(h.onToggle).toHaveBeenCalledWith(true);
+    expect(h.onToggle).toHaveBeenCalledWith(server, true);
 
     // "Test connection" is off (discovery only runs against enabled servers)…
     expect(screen.getByText('Test connection').closest('[role="menuitem"]'))

@@ -52,12 +52,14 @@ vi.mock('../McpServerRow', () => ({
     onPromoteToTemplate,
   }: {
     server: { name: string };
-    onPromoteToTemplate?: () => void;
+    // Mirror the real row's stable-handler contract: hand the row's own server
+    // back at call time so the parent can pass a single stable useCallback.
+    onPromoteToTemplate?: (server: { name: string }) => void;
   }) => (
     <div data-testid={`row-${server.name}`}>
       <span>{server.name}</span>
       {onPromoteToTemplate && (
-        <button type="button" onClick={() => onPromoteToTemplate()}>
+        <button type="button" onClick={() => onPromoteToTemplate(server)}>
           {`save-template-${server.name}`}
         </button>
       )}
