@@ -82,9 +82,54 @@ _GOTO_TIMEOUT_MS = 20_000
 # snapshots stale, oversized bitmaps over the reflowed layout.
 _PRINT_VIEWPORT = {"width": 816, "height": 1056}
 
-# Post-load settle before snapshotting: lets ResizeObserver-driven redraws
-# (Chart.js et al.) finish after print-media layout.
-_SETTLE_MS = 300
+# Settle script run after load, before snapshotting. A PDF freezes a single
+# frame, so unlike a live page (where ResizeObserver redraws are invisible
+# transients) any mid-reflow chart state becomes permanent. Wait for web fonts
+# (the main late-reflow source), force chart libraries to resize to their
+# current containers, and loop until the layout fingerprint is stable across
+# frames — bounded, no timing guesses.
+_SETTLE_JS = """
+async () => {
+  const raf = () => new Promise((r) => requestAnimationFrame(r));
+  if (document.fonts && document.fonts.ready) {
+    await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 3000))]);
+  }
+  const resizeCharts = () => {
+    window.dispatchEvent(new Event('resize'));
+    const C = window.Chart;
+    if (C && typeof C.getChart === 'function') {
+      document.querySelectorAll('canvas').forEach((c) => {
+        try { const i = C.getChart(c); if (i) i.resize(); } catch (e) {}
+      });
+    }
+    const E = window.echarts;
+    if (E && typeof E.getInstanceByDom === 'function') {
+      document.querySelectorAll('[_echarts_instance_]').forEach((el) => {
+        try { const i = E.getInstanceByDom(el); if (i) i.resize(); } catch (e) {}
+      });
+    }
+  };
+  const fingerprint = () => {
+    let s = document.documentElement.scrollHeight + ':';
+    document.querySelectorAll('canvas').forEach((c) => {
+      s += c.clientWidth + 'x' + c.clientHeight + ',';
+    });
+    return s;
+  };
+  let prev = '';
+  for (let i = 0; i < 20; i++) {
+    resizeCharts();
+    await raf(); await raf();
+    const cur = fingerprint();
+    if (cur === prev) break;
+    prev = cur;
+  }
+}
+"""
+
+# Backstop: even if a library ignores the forced resize, a canvas may never
+# paint wider than its container in the snapshot.
+_CANVAS_CLAMP_CSS = "canvas { max-width: 100% !important; }"
 
 _EXECUTABLE_MISSING_HINT = "executable doesn't exist"
 
@@ -165,10 +210,11 @@ async def render_workspace_pdf(internal_url: str, *, workspace_serve_prefix: str
                     # Networkidle never settled (long-polling asset, etc.) —
                     # fall back to a plain load and render what we have.
                     await page.goto(internal_url, wait_until="load", timeout=_GOTO_TIMEOUT_MS)
+                await page.evaluate(_SETTLE_JS)
+                await page.add_style_tag(content=_CANVAS_CLAMP_CSS)
                 await page.evaluate(
                     "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
                 )
-                await page.wait_for_timeout(_SETTLE_MS)
                 return await page.pdf(print_background=True, prefer_css_page_size=True)
 
             try:
