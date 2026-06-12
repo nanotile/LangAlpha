@@ -194,6 +194,14 @@ If any element starts at `opacity: 0` for an entrance animation, the `opacity: 1
 
 **Multi-column layouts print badly.** Print width is ~816 CSS px — a flex/grid row pairing a chart card with a text column does not fit and will overlap or crush. Either keep the document single-column throughout (safest for a report), or include print rules like the collapse block above for every side-by-side container you create. Chart wrappers keep their fixed height either way.
 
+**Landscape documents must declare it.** If the content is genuinely wide (a comparison matrix, a wide timeline, a dashboard-style sheet), declare the orientation in the print block — PDF export honors it and lays the page out at landscape width (~1056 CSS px), so charts and columns size for the real paper:
+
+```css
+@page { size: letter landscape; margin: 14mm 16mm; }
+```
+
+Named sizes (`a4`, `legal`, ...) with optional `landscape` work too. Without a declaration, export is portrait Letter — don't design landscape-wide content and skip the declaration.
+
 ## Authoring Workflow
 
 1. **Fetch and validate data** first (check for empty/None results). Sample or aggregate to a sensible size.

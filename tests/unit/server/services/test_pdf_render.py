@@ -1,13 +1,14 @@
-"""Unit tests for the server-side PDF renderer's SSRF allowlist.
+"""Unit tests for the server-side PDF renderer's browser-free logic.
 
-Exercises ``_is_request_allowed`` directly (a pure predicate) — the only part
-of ``pdf_render`` that runs without Chromium. CI has no browser binary, so the
-render path itself is covered by mocking in the route tests.
+Exercises ``_is_request_allowed`` and ``_viewport_from_page_size`` directly
+(pure functions) — the parts of ``pdf_render`` that run without Chromium. CI
+has no browser binary, so the render path itself is covered by mocking in the
+route tests.
 """
 
 from __future__ import annotations
 
-from src.server.services.pdf_render import _is_request_allowed
+from src.server.services.pdf_render import _is_request_allowed, _viewport_from_page_size
 
 _PREFIX = "http://127.0.0.1:8000/api/v1/wsfiles/ws-abc-0001/"
 
@@ -70,3 +71,48 @@ def test_lookalike_domains_blocked():
     assert not _is_request_allowed("https://unpkg.com.evil.io/x.js", _PREFIX)
     assert not _is_request_allowed("https://notunpkg.com/x.js", _PREFIX)
     assert not _is_request_allowed("https://cdnjs.cloudflare.com.evil.io/x.js", _PREFIX)
+
+
+# --- @page size → viewport ---------------------------------------------------
+
+
+def test_landscape_keyword_flips_letter_default():
+    assert _viewport_from_page_size("landscape") == {"width": 1056, "height": 816}
+
+
+def test_portrait_keyword_keeps_letter_default():
+    assert _viewport_from_page_size("portrait") == {"width": 816, "height": 1056}
+
+
+def test_named_size_portrait_default():
+    assert _viewport_from_page_size("a4") == {"width": 794, "height": 1123}
+    assert _viewport_from_page_size("letter") == {"width": 816, "height": 1056}
+
+
+def test_named_size_with_landscape():
+    assert _viewport_from_page_size("letter landscape") == {"width": 1056, "height": 816}
+    assert _viewport_from_page_size("a4 landscape") == {"width": 1123, "height": 794}
+    # Keyword order is free per the CSS grammar.
+    assert _viewport_from_page_size("landscape a4") == {"width": 1123, "height": 794}
+
+
+def test_explicit_lengths():
+    assert _viewport_from_page_size("297mm 210mm") == {"width": 1123, "height": 794}
+    assert _viewport_from_page_size("11in 8.5in") == {"width": 1056, "height": 816}
+    assert _viewport_from_page_size("1056px 816px") == {"width": 1056, "height": 816}
+
+
+def test_single_length_is_square():
+    assert _viewport_from_page_size("8.5in") == {"width": 816, "height": 816}
+
+
+def test_auto_and_unparseable_return_none():
+    assert _viewport_from_page_size("auto") is None
+    assert _viewport_from_page_size("") is None
+    assert _viewport_from_page_size("bogus") is None
+    assert _viewport_from_page_size("100vw 100vh") is None
+
+
+def test_absurd_dimensions_return_none():
+    assert _viewport_from_page_size("10px 10px") is None
+    assert _viewport_from_page_size("9000px 816px") is None

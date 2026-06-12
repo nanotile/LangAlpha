@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,104 @@ _GOTO_TIMEOUT_MS = 20_000
 # the start — otherwise Chart.js rasterizes at screen width and printToPDF
 # snapshots stale, oversized bitmaps over the reflowed layout.
 _PRINT_VIEWPORT = {"width": 816, "height": 1056}
+
+# Returns the first `size` declaration found in a CSS @page rule (including
+# ones nested under @media), or ''. Used to match the viewport to documents
+# designed for non-default paper (landscape, A4, ...) — page.pdf with
+# prefer_css_page_size already honors the declaration for the paper itself,
+# but layout/charts would otherwise still happen at portrait Letter width.
+_PAGE_SIZE_PROBE_JS = """
+() => {
+  const probe = (rules) => {
+    for (const rule of rules) {
+      if (rule.type === CSSRule.PAGE_RULE) {
+        const s = rule.style.getPropertyValue('size');
+        if (s) return s;
+      }
+      if (rule.cssRules && rule.cssRules.length) {
+        const s = probe(rule.cssRules);
+        if (s) return s;
+      }
+    }
+    return '';
+  };
+  for (const sheet of document.styleSheets) {
+    try {
+      const s = probe(sheet.cssRules);
+      if (s) return s;
+    } catch (e) {}
+  }
+  return '';
+}
+"""
+
+# Named CSS @page sizes in portrait CSS px at 96dpi (ledger is defined as
+# landscape tabloid, matching Chromium).
+_PAGE_SIZE_NAMES: dict[str, tuple[int, int]] = {
+    "a3": (1123, 1587),
+    "a4": (794, 1123),
+    "a5": (559, 794),
+    "b4": (944, 1334),
+    "b5": (665, 944),
+    "letter": (816, 1056),
+    "legal": (816, 1344),
+    "tabloid": (1056, 1632),
+    "ledger": (1632, 1056),
+}
+
+_LENGTH_UNITS_PX: dict[str, float] = {
+    "px": 1.0,
+    "in": 96.0,
+    "cm": 96.0 / 2.54,
+    "mm": 96.0 / 25.4,
+    "q": 96.0 / 101.6,
+    "pt": 96.0 / 72.0,
+    "pc": 16.0,
+}
+
+_LENGTH_RE = re.compile(r"(\d+(?:\.\d+)?)([a-z]+)")
+
+
+def _viewport_from_page_size(size_decl: str) -> dict | None:
+    """Translate a CSS ``@page size`` declaration into a viewport dict.
+
+    Accepts named sizes, orientation keywords, and 1–2 explicit lengths per
+    the CSS spec. Returns None for ``auto``, unparseable values, or absurd
+    dimensions — callers then keep the default portrait-Letter viewport.
+    """
+    tokens = size_decl.strip().lower().split()
+    if not tokens or "auto" in tokens:
+        return None
+    orientation: str | None = None
+    name: str | None = None
+    lengths: list[float] = []
+    for tok in tokens:
+        if tok in ("portrait", "landscape"):
+            orientation = tok
+        elif tok in _PAGE_SIZE_NAMES:
+            name = tok
+        else:
+            m = _LENGTH_RE.fullmatch(tok)
+            if not m or m.group(2) not in _LENGTH_UNITS_PX:
+                return None
+            lengths.append(float(m.group(1)) * _LENGTH_UNITS_PX[m.group(2)])
+    if lengths:
+        width = lengths[0]
+        height = lengths[1] if len(lengths) > 1 else lengths[0]
+    elif name:
+        width, height = _PAGE_SIZE_NAMES[name]
+        if orientation == "landscape" and width < height:
+            width, height = height, width
+    elif orientation:
+        width, height = _PRINT_VIEWPORT["width"], _PRINT_VIEWPORT["height"]
+        if orientation == "landscape":
+            width, height = height, width
+    else:
+        return None
+    width, height = round(width), round(height)
+    if not (200 <= width <= 5000 and 200 <= height <= 5000):
+        return None
+    return {"width": width, "height": height}
 
 # Settle script run after load, before snapshotting. A PDF freezes a single
 # frame, so unlike a live page (where ResizeObserver redraws are invisible
@@ -210,6 +309,10 @@ async def render_workspace_pdf(internal_url: str, *, workspace_serve_prefix: str
                     # Networkidle never settled (long-polling asset, etc.) —
                     # fall back to a plain load and render what we have.
                     await page.goto(internal_url, wait_until="load", timeout=_GOTO_TIMEOUT_MS)
+                declared_size = await page.evaluate(_PAGE_SIZE_PROBE_JS)
+                viewport = _viewport_from_page_size(declared_size) if declared_size else None
+                if viewport and viewport != _PRINT_VIEWPORT:
+                    await page.set_viewport_size(viewport)
                 await page.evaluate(_SETTLE_JS)
                 await page.add_style_tag(content=_CANVAS_CLAMP_CSS)
                 await page.evaluate(
