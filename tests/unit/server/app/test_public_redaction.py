@@ -211,6 +211,78 @@ class TestDownloadSharedFileRedaction:
         # Binary should NOT be redacted
         assert _SECRET_VALUE.encode() in resp.content
 
+    async def test_download_redacts_secret_from_json(self, public_client, mock_redactor):
+        """Non-text MIME that is still UTF-8 text (application/json) is redacted —
+        a vault secret must not leak just because the file isn't labeled text/*."""
+        text = f'{{"api_key": "{_SECRET_VALUE}"}}'
+        file_record = _make_file_record(
+            content_text=text,
+            mime_type="application/json",
+            file_name="config.json",
+        )
+
+        with (
+            patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())),
+            patch(_DB_GET_WS, AsyncMock(return_value=_make_workspace())),
+            patch(_WORK_DIR, return_value="/home/workspace"),
+            patch(_NORM_PATH, return_value="config.json"),
+            patch(_FILE_SVC, AsyncMock(return_value=file_record)),
+            patch(_GET_REDACTOR, return_value=mock_redactor),
+        ):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/download",
+                params={"path": "config.json"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.content.decode("utf-8")
+        assert _SECRET_VALUE not in body
+        assert f"[REDACTED:{_SECRET_NAME}]" in body
+
+
+# ---------------------------------------------------------------------------
+# TestPublicTraversalGuard — `..` rejected before the sandbox path validator
+# ---------------------------------------------------------------------------
+
+
+class TestPublicTraversalGuard:
+    """A `..` path 404s before reaching the DB/sandbox resolver, so the
+    unresolved-`..` traversal in the sandbox path validator stays unreachable."""
+
+    async def test_read_rejects_dotdot(self, public_client):
+        file_svc = AsyncMock()
+        with (
+            patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())),
+            patch(_FILE_SVC, file_svc),
+        ):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/read",
+                params={"path": "../../etc/passwd"},
+            )
+        assert resp.status_code == 404
+        file_svc.assert_not_awaited()
+
+    async def test_download_rejects_dotdot(self, public_client):
+        file_svc = AsyncMock()
+        with (
+            patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())),
+            patch(_FILE_SVC, file_svc),
+        ):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/download",
+                params={"path": "../../etc/passwd"},
+            )
+        assert resp.status_code == 404
+        file_svc.assert_not_awaited()
+
+    async def test_list_rejects_dotdot(self, public_client):
+        with patch(_THREAD_BY_TOKEN, AsyncMock(return_value=_make_thread())):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files",
+                params={"path": "../sibling"},
+            )
+        assert resp.status_code == 404
+
 
 # ---------------------------------------------------------------------------
 # TestServeSharedFile — GET /shared/{token}/files/serve/{path}

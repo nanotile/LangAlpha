@@ -211,6 +211,16 @@ class TestRedactBytes:
         r = self._make_redactor({"KEY": "secret_value_123"})
         assert r.redact_bytes(b"") == b""
 
+    def test_redacts_secret_in_non_utf8_body(self):
+        """A secret in a non-UTF-8 body is scrubbed via the lossless latin-1
+        fallback; surrounding (undecodable) bytes are preserved."""
+        r = self._make_redactor({"KEY": "secret_value_123"})
+        data = b"\xff\xfe head secret_value_123 tail"
+        result = r.redact_bytes(data)
+        assert b"secret_value_123" not in result
+        assert b"[REDACTED:KEY]" in result
+        assert result.startswith(b"\xff\xfe head ")
+
 
 class TestGetRedactor:
     """Verify singleton behavior."""
