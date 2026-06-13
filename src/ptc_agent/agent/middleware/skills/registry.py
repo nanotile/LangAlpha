@@ -293,6 +293,7 @@ SKILL_REGISTRY: dict[str, SkillDefinition] = {
         tools=[],
         skill_md_path="skills/html-report/SKILL.md",
         exposure="ptc",
+        command="html-report",
     ),
     "ui-design": SkillDefinition(
         name="ui-design",

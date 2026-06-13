@@ -8,6 +8,7 @@ import yaml
 
 from ptc_agent.agent.middleware.skills.registry import (
     SKILL_REGISTRY,
+    get_command_to_skill_map,
     get_sandbox_skill_names,
     get_skill,
     get_skill_registry,
@@ -17,6 +18,10 @@ from ptc_agent.agent.middleware.skills.registry import (
 # New HTML-output skills under test.
 NEW_SKILLS = ("html-report", "ui-design")
 
+# Expected slash-command shortcut per skill (None = no shortcut).
+# html-report is user-invocable (like /dashboard); ui-design is a pure design reference.
+EXPECTED_COMMANDS = {"html-report": "html-report", "ui-design": None}
+
 # Repo root: tests/unit/middleware/skills/ -> repo root is four parents up.
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -25,12 +30,12 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 @pytest.mark.parametrize("name", NEW_SKILLS)
 def test_skill_registered(name):
-    """Both new skills are present in the registry as plain, tool-less, command-less PTC skills."""
+    """Both new skills are present in the registry as plain, tool-less PTC skills."""
     assert name in SKILL_REGISTRY
     skill = SKILL_REGISTRY[name]
     assert skill.name == name
     assert skill.tools == []
-    assert skill.command is None
+    assert skill.command == EXPECTED_COMMANDS[name]
     assert skill.skill_md_path == f"skills/{name}/SKILL.md"
 
 
@@ -76,3 +81,10 @@ def test_skill_md_exists_and_frontmatter_parses(name):
     assert isinstance(frontmatter, dict)
     assert frontmatter.get("name") == name
     assert str(frontmatter.get("description", "")).strip()
+
+
+def test_command_shortcuts():
+    """html-report is invocable via the /html-report shortcut; ui-design has none."""
+    commands = get_command_to_skill_map("ptc")
+    assert commands.get("html-report") == "html-report"
+    assert "ui-design" not in commands.values()
