@@ -1,5 +1,6 @@
 """User Management API Router — user profile and preferences endpoints."""
 
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -387,6 +388,22 @@ def _validate_custom_providers(custom_providers: list) -> None:
             raise HTTPException(status_code=400, detail=f"custom_providers[{idx}]: use_response_api must be a boolean")
 
 
+_VALID_OUTPUT_FORMATS = {"markdown", "html"}
+
+
+def _validate_agent_preference(agent_pref: dict) -> None:
+    """Validate agent_preference before persisting. Raises HTTPException 400 on invalid data."""
+    # output_format may be absent or None (delete/default); else must be a
+    # known format. Not a Literal on the model so None survives the JSONB merge
+    # as a key deletion rather than being stripped at parse time.
+    if "output_format" in agent_pref:
+        of = agent_pref["output_format"]
+        if of is not None and (not isinstance(of, str) or of not in _VALID_OUTPUT_FORMATS):
+            raise HTTPException(
+                status_code=400,
+                detail=f"output_format must be one of {sorted(_VALID_OUTPUT_FORMATS)}",
+            )
+
 
 @router.put("/users/me/preferences", response_model=UserPreferencesResponse)
 @handle_api_exceptions("update preferences", logger)
@@ -462,6 +479,10 @@ async def update_preferences(
                     detail=f"search_depth must be one of {sorted(valid_depths)}",
                 )
 
+    # Validate agent_preference (output_format shape). None = key deletion.
+    if agent_pref:
+        _validate_agent_preference(agent_pref)
+
     preferences = await upsert_user_preferences(
         user_id=user_id,
         risk_preference=risk_pref,
@@ -518,7 +539,9 @@ async def upload_avatar(
     ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "png"
     key = f"avatars/{user_id}.{ext}"
 
-    success = upload_bytes(key, content, content_type=file.content_type)
+    # upload_bytes is a synchronous boto3 call; offload it so it doesn't block
+    # the event loop during the network round-trip to object storage.
+    success = await asyncio.to_thread(upload_bytes, key, content, content_type=file.content_type)
     if not success:
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="Failed to upload avatar")

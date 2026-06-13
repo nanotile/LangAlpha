@@ -17,8 +17,17 @@ import {
   handleHistoryToolCallResult,
   handleHistoryTodoUpdate,
 } from '../ChatAgent/hooks/utils/historyEventHandlers';
-import { getSharedThread, replaySharedThread, getSharedFiles, readSharedFile, downloadSharedFileAs } from './api';
-import type { SharedThreadMetadata, SharedFileEntry, SSEEvent } from './api';
+import {
+  getSharedThread,
+  replaySharedThread,
+  getSharedFiles,
+  readSharedFile,
+  downloadSharedFileAs,
+  fetchSharedServeObjectUrl,
+  fetchSharedServeArrayBuffer,
+} from './api';
+import type { SharedThreadMetadata, SSEEvent } from './api';
+import { buildSharedServeUrl } from '../ChatAgent/components/viewers/html/wsfilesUrl';
 
 // Message record type compatible with historyEventHandlers
 type MessageRecord = Record<string, unknown>;
@@ -51,11 +60,10 @@ export default function SharedChatView() {
   const [messages, setMessages] = useState<MessageRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [_replayDone, setReplayDone] = useState(false);
 
   // File panel (right side, matching ChatView's rightPanelType === 'file')
   const [showFilePanel, setShowFilePanel] = useState(false);
-  const [files, setFiles] = useState<SharedFileEntry[]>([]);
+  const [files, setFiles] = useState<string[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filePanelTargetFile, setFilePanelTargetFile] = useState<string | null>(null);
   const [rightPanelWidth, setRightPanelWidth] = useState(750);
@@ -113,7 +121,6 @@ export default function SharedChatView() {
           }
 
           if (eventType === 'replay_done') {
-            setReplayDone(true);
             setLoading(false);
             return;
           }
@@ -286,7 +293,6 @@ export default function SharedChatView() {
         // Mark all messages as done streaming
         setMessages((prev) => prev.map((m) => ({ ...m, isStreaming: false })));
         setLoading(false);
-        setReplayDone(true);
       } catch (e: unknown) {
         if (!cancelled) {
           setError((e as Error).message);
@@ -326,17 +332,27 @@ export default function SharedChatView() {
     }
   }, [canBrowseFiles, showFilePanel, files.length, shareToken]);
 
-  // Build API adapter for FilePanel — wraps public endpoints
+  // Build API adapter for FilePanel — wraps public endpoints. buildServedUrl
+  // points the HTML preview iframe at the public serve URL (no workspace UUID).
   const fileApiAdapter = useMemo(() => ({
     readFile: (path: string) => readSharedFile(shareToken!, path),
-    downloadFile: (path: string) => downloadSharedFileAs(shareToken!, path, 'blob'),
-    downloadFileAsArrayBuffer: (path: string) => downloadSharedFileAs(shareToken!, path, 'arraybuffer'),
+    // HTML files read their full source here; the public read endpoint caps at
+    // its own line limit, and the preview renders via the served URL regardless.
+    readFileFull: (path: string) => readSharedFile(shareToken!, path),
+    // Byte-access previews go through the serve endpoint (allow_files), matching
+    // the rendered report. Only the explicit save affordance uses the download
+    // endpoint (allow_download) — see fetchSharedServeObjectUrl docs.
+    downloadFile: (path: string) => fetchSharedServeObjectUrl(shareToken!, path),
+    downloadFileAsArrayBuffer: (path: string) => fetchSharedServeArrayBuffer(shareToken!, path),
     triggerDownload: (path: string) => downloadSharedFileAs(shareToken!, path, 'download'),
+    buildServedUrl: (path: string, opts?: { injectTheme?: boolean }) =>
+      buildSharedServeUrl(shareToken!, path, opts),
   }), [shareToken]);
 
-  // Image downloader for WorkspaceProvider — enables inline image rendering in markdown
+  // Inline markdown images render via the serve endpoint (allow_files) so they
+  // load on a copy-link share, which grants allow_files but not allow_download.
   const imageDownloader = useCallback(
-    (path: string) => downloadSharedFileAs(shareToken!, path, 'blob'),
+    (path: string) => fetchSharedServeObjectUrl(shareToken!, path),
     [shareToken],
   );
 
@@ -355,6 +371,17 @@ export default function SharedChatView() {
       setFilesLoading(false);
     }
   }, [canBrowseFiles, files.length, shareToken]);
+
+  // Deep link: `?file=<path>` opens that report directly once metadata + file
+  // permission are known. One-shot — the share-link target from §1.3b.
+  const fileDeepLinkConsumedRef = useRef(false);
+  useEffect(() => {
+    if (fileDeepLinkConsumedRef.current || !metadata || !canBrowseFiles) return;
+    const fileParam = new URLSearchParams(window.location.search).get('file');
+    if (!fileParam) return;
+    fileDeepLinkConsumedRef.current = true;
+    handleOpenFile(fileParam);
+  }, [metadata, canBrowseFiles, handleOpenFile]);
 
   // Drag-to-resize file panel (matches ChatView)
   const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
@@ -541,7 +568,7 @@ export default function SharedChatView() {
               workspaceId=""
               apiAdapter={fileApiAdapter}
               onClose={() => setShowFilePanel(false)}
-              files={files.map(f => f.name)}
+              files={files}
               filesLoading={filesLoading}
               targetFile={filePanelTargetFile}
               onTargetFileHandled={() => setFilePanelTargetFile(null)}

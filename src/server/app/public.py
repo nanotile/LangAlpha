@@ -9,6 +9,7 @@ Endpoints:
 - GET /api/v1/public/shared/{share_token}/replay    — SSE conversation replay
 - GET /api/v1/public/shared/{share_token}/files     — File listing (requires allow_files)
 - GET /api/v1/public/shared/{share_token}/files/read     — Read file content (requires allow_files)
+- GET /api/v1/public/shared/{share_token}/files/serve/{path} — Serve file inline with sandboxed CSP (requires allow_files)
 - GET /api/v1/public/shared/{share_token}/files/download — Download raw file (requires allow_download)
 """
 
@@ -18,8 +19,8 @@ import logging
 import mimetypes
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Path, Query, Request
+from fastapi.responses import Response, StreamingResponse
 
 from src.observability import observe_replay_stream
 from src.server.utils.http_headers import content_disposition
@@ -30,12 +31,19 @@ from src.server.database.conversation import (
     get_queries_for_thread,
     get_responses_for_thread,
 )
+from src.server.database.workspace import get_workspace as db_get_workspace
 from src.server.app.workspace_files import (
+    _get_work_dir,
+    _has_traversal,
     _is_always_hidden_path,
     _is_hidden_path,
     _is_system_path,
+    _is_text_content_type,
+    _is_utf8,
     _normalize_requested_path,
     _is_binary,
+    render_workspace_file_pdf,
+    serve_workspace_file,
     DEFAULT_READ_LIMIT_LINES,
 )
 
@@ -64,6 +72,97 @@ def _require_permission(perms: dict[str, Any], key: str) -> None:
     """Raise 403 if a specific permission is not granted."""
     if not perms.get(key):
         raise HTTPException(status_code=403, detail=f"Permission '{key}' not granted for this shared thread")
+
+
+def _wants_html(request: Request) -> bool:
+    """True when the caller is a browser/iframe (Accept includes text/html), so a
+    failed serve should render a page instead of raw JSON. API clients (Accept
+    ``*/*`` etc.) keep the JSON error."""
+    return "text/html" in request.headers.get("accept", "").lower()
+
+
+def _prefers_chinese(request: Request) -> bool:
+    """Whether the browser's top Accept-Language tag is Chinese."""
+    primary = request.headers.get("accept-language", "").split(",")[0].strip().lower()
+    return primary.startswith("zh")
+
+
+def _share_unavailable_page(status_code: int, *, chinese: bool) -> str:
+    """Self-contained, theme-aware HTML page shown when a browser opens a shared
+    report link that has been revoked (404) or lacks file access (403)."""
+    if chinese:
+        lang = "zh-CN"
+        heading = "此分享报告不可用"
+        detail = (
+            "创建者尚未为此链接开启文件访问权限。"
+            if status_code == 403
+            else "该链接可能已被创建者关闭，或报告已不存在。"
+        )
+        link_text = "前往 LangAlpha"
+    else:
+        lang = "en"
+        heading = "This shared report isn’t available"
+        detail = (
+            "The owner hasn’t enabled file access for this link."
+            if status_code == 403
+            else "The link may have been turned off by its owner, or the report no longer exists."
+        )
+        link_text = "Go to LangAlpha"
+    return f"""<!DOCTYPE html>
+<html lang="{lang}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>{heading}</title>
+<style>
+  :root {{
+    --bg: #F3EEE8; --bg-glow: rgba(55, 82, 139, 0.06);
+    --card: #FFFCF9; --border: rgba(0, 0, 0, 0.08);
+    --text: #2D2B28; --muted: #7A756F; --accent: #37528B;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --bg: #000000; --bg-glow: rgba(65, 97, 164, 0.12);
+      --card: #0A0A0A; --border: rgba(255, 255, 255, 0.08);
+      --text: #FFFFFF; --muted: #999999; --accent: #4161A4;
+    }}
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ height: 100%; margin: 0; }}
+  body {{
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100%; padding: 24px;
+    background: radial-gradient(circle at 50% 32%, var(--bg-glow), transparent 60%), var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.6;
+  }}
+  .card {{
+    max-width: 30rem; width: 100%; text-align: center;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 40px 32px;
+  }}
+  .badge {{
+    font-size: 13px; font-weight: 600; letter-spacing: .01em;
+    color: var(--muted); margin-bottom: 20px;
+  }}
+  h1 {{ font-size: 20px; font-weight: 600; margin: 0 0 10px; }}
+  p {{ font-size: 14px; color: var(--muted); margin: 0 0 24px; }}
+  a {{ font-size: 14px; font-weight: 500; color: var(--accent); text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">LangAlpha</div>
+    <h1>{heading}</h1>
+    <p>{detail}</p>
+    <a href="/">{link_text}</a>
+  </div>
+</body>
+</html>"""
 
 
 # =============================================================================
@@ -160,7 +259,15 @@ async def replay_shared_thread(share_token: str):
                     continue
 
                 seq += 1
+                # Shallow-copy so we never mutate the stored/cached event dict.
                 replay_data = dict(data)
+                # workspace_id is the bearer credential for GET /api/v1/wsfiles/
+                # {workspace_id}/{path}; stored workspace_status events carry it
+                # (see handlers/chat/ptc_workflow.py). Leaking it to a public,
+                # unauthenticated viewer would grant access to ALL workspace
+                # files, so strip it (plus the server-internal sandbox_state).
+                replay_data.pop("workspace_id", None)
+                replay_data.pop("sandbox_state", None)
                 replay_data.setdefault("thread_id", thread_id)
                 replay_data["turn_index"] = turn_index
                 replay_data["response_id"] = str(response.get("conversation_response_id"))
@@ -206,6 +313,13 @@ async def list_shared_files(
     """List files in a shared thread's workspace. Requires allow_files permission."""
     thread, workspace_id = await _get_shared_workspace_id(share_token, require_files=True)
 
+    # Reject `..` before it reaches the sandbox path validator, which only
+    # prefix-checks the work dir and does not resolve `..` — so an unresolved
+    # `../../etc/passwd` would otherwise read outside the workspace on a live
+    # sandbox. Mirrors the serve-core guard (workspace_files._has_traversal).
+    if _has_traversal(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
     from src.server.database.workspace import get_workspace as db_get_workspace
     from src.server.services.persistence.file import FilePersistenceService
     from src.server.services.workspace_manager import WorkspaceManager
@@ -222,7 +336,7 @@ async def list_shared_files(
     # For public access, we prefer DB to avoid starting sandboxes
     file_tree = await FilePersistenceService.get_file_tree(workspace_id)
 
-    normalized_path = _normalize_requested_path(path)
+    normalized_path = _normalize_requested_path(path, _get_work_dir())
     if normalized_path:
         file_tree = [
             f for f in file_tree
@@ -243,12 +357,17 @@ async def list_shared_files(
     if files:
         return {"path": path, "files": files, "source": "database"}
 
-    # Try live sandbox if DB has no files
-    if workspace.get("status") not in ("stopped", "stopping", "starting"):
+    # Try live sandbox only when it's ALREADY warm in this worker. Mirrors the
+    # serve-core safe pattern (workspace_files._resolve_serve_bytes): gate on the
+    # pure in-memory has_ready_session() check and read from the cached session
+    # only — never call get_session_for_workspace(), which would do a Daytona
+    # attach/restart and let an unauthenticated UUID-only request wake a sandbox
+    # (denial-of-wallet). A stale 'running' DB row with no warm session → DB-only.
+    if workspace.get("status") == "running":
         try:
             manager = WorkspaceManager.get_instance()
-            session = await manager.get_session_for_workspace(workspace_id)
-            sandbox = getattr(session, "sandbox", None)
+            session = manager.get_session_if_ready(workspace_id)
+            sandbox = getattr(session, "sandbox", None) if session else None
             if sandbox:
                 absolute_paths = await sandbox.aglob_files("**/*", path=path)
                 from src.server.app.workspace_files import _to_client_path
@@ -274,6 +393,11 @@ async def read_shared_file(
     """Read a text file from a shared thread's workspace. Requires allow_files permission."""
     thread, workspace_id = await _get_shared_workspace_id(share_token, require_files=True)
 
+    # See list_shared_files: reject `..` before the sandbox validator, which
+    # does not resolve it.
+    if _has_traversal(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
     from src.server.database.workspace import get_workspace as db_get_workspace
     from src.server.services.persistence.file import FilePersistenceService
     from src.server.services.workspace_manager import WorkspaceManager
@@ -282,7 +406,7 @@ async def read_shared_file(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    normalized_path = _normalize_requested_path(path)
+    normalized_path = _normalize_requested_path(path, _get_work_dir())
     if not normalized_path:
         raise HTTPException(status_code=400, detail="File path is required")
 
@@ -310,16 +434,19 @@ async def read_shared_file(
             "limit": limit,
             "content": content,
             "mime": mime,
-            "truncated": False,
+            "truncated": len(lines) > offset + limit,
             "source": "database",
         }
 
-    # Try live sandbox — vault secrets from session cache (instant)
-    if workspace.get("status") not in ("stopped", "stopping", "starting"):
+    # Try live sandbox only when it's ALREADY warm in this worker — see
+    # list_shared_files: gate on the in-memory has_ready_session() and read the
+    # cached session only, never get_session_for_workspace() (which would do a
+    # Daytona attach/restart from an unauthenticated request → denial-of-wallet).
+    if workspace.get("status") == "running":
         try:
             manager = WorkspaceManager.get_instance()
-            session = await manager.get_session_for_workspace(workspace_id)
-            sandbox = getattr(session, "sandbox", None)
+            session = manager.get_session_if_ready(workspace_id)
+            sandbox = getattr(session, "sandbox", None) if session else None
             if sandbox:
                 norm, error = sandbox.validate_and_normalize_path(path)
                 if error:
@@ -350,7 +477,7 @@ async def read_shared_file(
                     "limit": limit,
                     "content": content,
                     "mime": mime_type or "text/plain",
-                    "truncated": False,
+                    "truncated": len(lines) > offset + limit,
                     "source": "sandbox",
                 }
         except HTTPException:
@@ -369,6 +496,11 @@ async def download_shared_file(
     """Download a raw file from a shared thread's workspace. Requires allow_download permission."""
     thread, workspace_id = await _get_shared_workspace_id(share_token, require_download=True)
 
+    # See list_shared_files: reject `..` before the sandbox validator, which
+    # does not resolve it.
+    if _has_traversal(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
     from src.server.database.workspace import get_workspace as db_get_workspace
     from src.server.services.persistence.file import FilePersistenceService
     from src.server.services.workspace_manager import WorkspaceManager
@@ -377,7 +509,7 @@ async def download_shared_file(
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    normalized_path = _normalize_requested_path(path)
+    normalized_path = _normalize_requested_path(path, _get_work_dir())
     if not normalized_path:
         raise HTTPException(status_code=400, detail="File path is required")
 
@@ -402,7 +534,7 @@ async def download_shared_file(
         filename = file_record.get("file_name", "download")
         mime = file_record.get("mime_type") or "application/octet-stream"
 
-        if mime and mime.startswith("text/"):
+        if _is_text_content_type(mime) or _is_utf8(content):
             content = get_redactor().redact_bytes(content, vault_secrets=vault_secrets)
 
         return StreamingResponse(
@@ -411,12 +543,15 @@ async def download_shared_file(
             headers={"Content-Disposition": content_disposition(filename)},
         )
 
-    # Try live sandbox — vault secrets from session cache (instant)
-    if workspace.get("status") not in ("stopped", "stopping", "starting"):
+    # Try live sandbox only when it's ALREADY warm in this worker — see
+    # list_shared_files: gate on the in-memory has_ready_session() and read the
+    # cached session only, never get_session_for_workspace() (which would do a
+    # Daytona attach/restart from an unauthenticated request → denial-of-wallet).
+    if workspace.get("status") == "running":
         try:
             manager = WorkspaceManager.get_instance()
-            session = await manager.get_session_for_workspace(workspace_id)
-            sandbox = getattr(session, "sandbox", None)
+            session = manager.get_session_if_ready(workspace_id)
+            sandbox = getattr(session, "sandbox", None) if session else None
             if sandbox:
                 norm, error = sandbox.validate_and_normalize_path(path)
                 if error:
@@ -434,7 +569,7 @@ async def download_shared_file(
                 filename = client_path.split("/")[-1] if client_path else "download"
                 mime, _ = mimetypes.guess_type(filename)
 
-                if mime and mime.startswith("text/"):
+                if _is_text_content_type(mime or "") or _is_utf8(content):
                     content = get_redactor().redact_bytes(content, vault_secrets=vault_secrets)
 
                 return StreamingResponse(
@@ -448,3 +583,71 @@ async def download_shared_file(
             logger.debug(f"Sandbox not available for shared file download in workspace {workspace_id}")
 
     raise HTTPException(status_code=404, detail="File not found")
+
+
+@router.get("/shared/{share_token}/files/serve/{path:path}")
+async def serve_shared_file(
+    request: Request,
+    share_token: str,
+    path: str = Path(..., description="File path within the shared workspace."),
+    inject: str | None = Query(None, description="Set to 'theme' to splice theme-sync into HTML."),
+    format: str | None = Query(None, description="Set to 'pdf' to render HTML as a PDF."),
+    scale: float | None = Query(
+        None, ge=0.5, le=2.0, description="PDF only: render scale (0.5–2.0)."
+    ),
+    page_numbers: bool = Query(
+        False, description="PDF only: draw an 'N / total' footer in the page margin."
+    ),
+    branding: bool = Query(
+        True, description="PDF only: stamp 'LangAlpha · <date>' in the footer."
+    ),
+) -> Response:
+    """Serve a shared workspace file inline with a sandboxed CSP. Requires allow_files.
+
+    Path-style so a served document's relative subresources (``charts/x.png``)
+    resolve under the same token prefix. Reuses the workspace file-serving core
+    (MIME / traversal / redaction / DB-fallback / theme injection); the
+    workspace UUID is resolved server-side and never appears in the URL.
+    ``?format=pdf`` renders HTML files via server-side Chromium over the same
+    internal wsfiles URL (the public URL never matters internally).
+
+    Gated on ``allow_files`` only, matching ``read_shared_file``: in this share
+    model ``allow_files`` already grants byte access to file content, and
+    ``allow_download`` gates the explicit download affordance, not raw content
+    reachability. So serving (and PDF export) need only ``allow_files``.
+    """
+    try:
+        _, workspace_id = await _get_shared_workspace_id(share_token, require_files=True)
+
+        workspace = await db_get_workspace(workspace_id)
+        if not workspace:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        if format == "pdf":
+            return await render_workspace_file_pdf(
+                workspace_id,
+                path,
+                workspace=workspace,
+                scale=scale,
+                page_numbers=page_numbers,
+                branding=branding,
+            )
+
+        return await serve_workspace_file(
+            workspace_id,
+            path,
+            inject_theme=(inject == "theme"),
+            workspace=workspace,
+        )
+    except HTTPException as exc:
+        # A browser/iframe opening a revoked (404) or forbidden (403) shared link
+        # should see a branded page, not raw JSON. Other statuses and API clients
+        # (Accept without text/html) keep the default JSON error.
+        if exc.status_code in (403, 404) and _wants_html(request):
+            return Response(
+                content=_share_unavailable_page(exc.status_code, chinese=_prefers_chinese(request)),
+                status_code=exc.status_code,
+                media_type="text/html; charset=utf-8",
+                headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
+            )
+        raise

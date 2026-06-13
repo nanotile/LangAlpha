@@ -77,6 +77,9 @@ interface ApiAdapter {
   downloadFile?: (path: string) => Promise<string>;
   downloadFileAsArrayBuffer?: (path: string) => Promise<ArrayBuffer>;
   triggerDownload?: (path: string) => Promise<void>;
+  /** Override the served URL for HTML preview (e.g. the public share serve URL,
+   *  used on /s/:shareToken where the workspace UUID isn't available). */
+  buildServedUrl?: (path: string, opts?: { injectTheme?: boolean }) => string;
 }
 
 interface BackupResult {
@@ -598,6 +601,10 @@ interface FilePanelProps {
    * when FilePanel is embedded inside a tabbed wrapper that owns the close button. */
   hideClose?: boolean;
   onSwitchToMemoTab?: (() => void) | null;
+  /** Copy a shareable link to an HTML report (authenticated app only). Enables
+   *  sharing if needed, then copies a direct full-tab link to the served file
+   *  (`${origin}/api/v1/public/shared/{token}/files/serve/<path>`). */
+  onCopyShareLink?: ((filePath: string) => void) | null;
 }
 
 function FilePanel({
@@ -620,6 +627,7 @@ function FilePanel({
   onToggleSystemFiles = null,
   hideClose = false,
   onSwitchToMemoTab = null,
+  onCopyShareLink = null,
 }: FilePanelProps): React.ReactElement {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
@@ -1164,6 +1172,26 @@ function FilePanel({
       return;
     }
 
+    // HTML files: read the full source (the viewer renders via the served URL,
+    // but the Source tab needs untruncated content — the paginated read caps at 20k lines).
+    if (['html', 'htm'].includes(ext)) {
+      setSelectedFile(filePath);
+      setFileLoading(true);
+      try {
+        const data = await readFileFullFn(workspaceId, filePath);
+        setFileContent(data.content || '');
+        setFileMime('text/html');
+      } catch (err) {
+        console.error('[FilePanel] Failed to read HTML file:', err);
+        setFileError(categorizeFileError(err, wsData?.status));
+        setFileContent(null);
+        setFileMime(null);
+      } finally {
+        setFileLoading(false);
+      }
+      return;
+    }
+
     // Text files - read content
     setSelectedFile(filePath);
     setFileLoading(true);
@@ -1489,6 +1517,7 @@ function FilePanel({
             onOpenExportModal={() => setExportModalOpen(true)}
             triggerDownloadFn={triggerDownloadFn}
             readFileFullFn={readFileFullFn}
+            htmlServedUrl={selectedFile ? apiAdapter?.buildServedUrl?.(selectedFile) : undefined}
             editorRef={editorRef}
             canUndo={canUndo}
             canRedo={canRedo}
@@ -1743,7 +1772,15 @@ function FilePanel({
             ) : ['html', 'htm'].includes(getFileExtension(selectedFile)) ? (
               <Suspense fallback={<DocumentLoadingFallback />}>
                 <DocumentErrorBoundary fallback={<DocumentErrorFallback onDownload={() => triggerDownloadFn(workspaceId, selectedFile).catch((err: unknown) => console.error('[FilePanel] Download failed:', err))} />}>
-                  <HtmlViewer content={fileContent ?? ''} />
+                  <HtmlViewer
+                    content={fileContent ?? ''}
+                    fileName={fileName}
+                    workspaceId={workspaceId}
+                    filePath={selectedFile}
+                    servedUrlOverride={apiAdapter?.buildServedUrl?.(selectedFile, { injectTheme: true })}
+                    onCopyShareLink={onCopyShareLink ?? undefined}
+                    onTriggerDownload={() => triggerDownloadFn(workspaceId, selectedFile).catch((err: unknown) => console.error('[FilePanel] Download failed:', err))}
+                  />
                 </DocumentErrorBoundary>
               </Suspense>
             ) : isEditing ? (

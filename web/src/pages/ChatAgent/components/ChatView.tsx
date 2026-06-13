@@ -10,7 +10,10 @@ import { usePreferences } from '@/hooks/usePreferences';
 import { useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/queryKeys';
 import { updateCurrentUser } from '../../Dashboard/utils/api';
-import { softInterruptWorkflow, getWorkspace, summarizeThread, offloadThread, getPreviewUrl } from '../utils/api';
+import { softInterruptWorkflow, getWorkspace, summarizeThread, offloadThread, getPreviewUrl, getThreadShareStatus, updateThreadSharing } from '../utils/api';
+import { buildSharedServeUrl, buildWsfilesUrl } from './viewers/html/wsfilesUrl';
+import ShareReportLinkModal from './ShareReportLinkModal';
+import { toast } from '@/components/ui/use-toast';
 import { mergeWarmingDisplay } from '../utils/warmWorkspace';
 import { useChatMessages } from '../hooks/useChatMessages';
 import { saveChatSession, getChatSession, clearChatSession } from '../hooks/utils/chatSessionRestore';
@@ -315,6 +318,8 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   const { preferences } = usePreferences();
   const queryClient = useQueryClient();
   const initialMessageSentRef = useRef(false);
+  // Guards one-shot consumption of the ?file= deep link (report share / copy link).
+  const fileDeepLinkConsumedRef = useRef(false);
   // Determine agent mode: flash workspaces use flash mode, otherwise ptc
   const state = location.state as LocationState | null;
   const [agentMode, setAgentMode] = useState(state?.agentMode || 'ptc');
@@ -719,6 +724,70 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   currentThreadIdRef.current = currentThreadId;
   // Keep resolvedThreadIdRef in sync with the resolved thread ID from useChatMessages
   resolvedThreadIdRef.current = currentThreadId || threadId;
+
+  // Copy-a-link to an HTML report opens a consent chooser; the actual copy runs
+  // in one of the two handlers below depending on the user's pick.
+  const [shareLinkFile, setShareLinkFile] = useState<string | null>(null);
+
+  const handleCopyShareLink = useCallback((filePath: string) => {
+    setShareLinkFile(filePath);
+  }, []);
+
+  // Shareable link: public, revocable, token-scoped. Enables thread sharing
+  // with allow_files on first use (always fetching live status first, so
+  // spreading the current permissions preserves any existing allow_download
+  // rather than clearing it), then copies the public serve URL. Throws on
+  // failure so the chooser stays open.
+  const copyShareableReportLink = useCallback(async () => {
+    const filePath = shareLinkFile;
+    const tid = currentThreadIdRef.current;
+    if (!filePath || !tid) return;
+    try {
+      let status = await getThreadShareStatus(tid);
+      if (!status?.is_shared || !status?.share_token) {
+        status = await updateThreadSharing(tid, {
+          is_shared: true,
+          permissions: { ...(status?.permissions || {}), allow_files: true },
+        });
+      } else if (!status.permissions?.allow_files) {
+        status = await updateThreadSharing(tid, {
+          is_shared: true,
+          permissions: { ...status.permissions, allow_files: true },
+        });
+      }
+      const token = status?.share_token;
+      if (!token) throw new Error('No share token');
+      // buildSharedServeUrl encodes each path segment but preserves slashes, so
+      // relative subresources still resolve. It's relative when the API base is
+      // same-origin (the nginx case); make it absolute for a copyable link.
+      const served = buildSharedServeUrl(token, filePath);
+      const url = /^https?:\/\//i.test(served) ? served : `${window.location.origin}${served}`;
+      await navigator.clipboard.writeText(url);
+      toast({ description: t('filePanel.shareLinkCopied') });
+    } catch (e) {
+      console.error('[ChatView] Copy shareable link failed:', e);
+      toast({ description: t('filePanel.shareLinkFailed'), variant: 'destructive' });
+      throw e;
+    }
+  }, [shareLinkFile, t]);
+
+  // Direct link: the raw wsfiles URL (workspace UUID is the credential). Renders
+  // the file full screen. No sharing is enabled, but the link is not revocable
+  // and reaches the whole workspace. Throws on failure so the chooser stays open.
+  const copyDirectReportLink = useCallback(async () => {
+    const filePath = shareLinkFile;
+    if (!filePath) return;
+    try {
+      const served = buildWsfilesUrl(workspaceId, filePath);
+      const url = /^https?:\/\//i.test(served) ? served : `${window.location.origin}${served}`;
+      await navigator.clipboard.writeText(url);
+      toast({ description: t('filePanel.directLinkCopied') });
+    } catch (e) {
+      console.error('[ChatView] Copy direct link failed:', e);
+      toast({ description: t('filePanel.shareLinkFailed'), variant: 'destructive' });
+      throw e;
+    }
+  }, [shareLinkFile, workspaceId, t]);
 
   // Save chat session on unmount for cross-tab restoration (workspace + thread only).
   // Only the active view saves — evicted hidden views must not overwrite (R1).
@@ -1149,6 +1218,27 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   // file-panel handoffs) that still use the older name. Pure identity — the
   // unified router does the path-aware classification on every call.
   const handleOpenFileFromChat = handleOpenAgentArtifactFromChat;
+
+  // One-shot ?file= deep link: opens the file panel targeting that file. Gated
+  // on isActive so only the visible ChatView consumes it (ChatAgent keeps cached
+  // hidden instances), and on workspaceId so the panel has something to read.
+  // The param is stripped after consuming so it can't re-fire on re-render.
+  useEffect(() => {
+    if (!isActive || !workspaceId || fileDeepLinkConsumedRef.current) return;
+    const params = new URLSearchParams(location.search);
+    const raw = params.get('file');
+    if (!raw) return;
+    fileDeepLinkConsumedRef.current = true;
+    // URLSearchParams.get already percent-decodes; a second decodeURIComponent
+    // would throw on a literal '%' in the filename (e.g. 100%25_report.html).
+    handleOpenFileFromChat(raw);
+    params.delete('file');
+    const search = params.toString();
+    navigate(
+      { pathname: location.pathname, search: search ? `?${search}` : '' },
+      { replace: true, state: location.state },
+    );
+  }, [isActive, workspaceId, location.search, location.pathname, location.state, navigate, handleOpenFileFromChat]);
 
   // Open file panel filtered to a specific directory. Clears every other
   // target first — symmetric with handleOpenAgentArtifactFromChat — so a
@@ -1912,6 +2002,13 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
       <div aria-live="polite" aria-atomic="false" className="sr-only">
         {recentlyCompletedAnnouncement}
       </div>
+      <ShareReportLinkModal
+        open={shareLinkFile !== null}
+        fileName={shareLinkFile?.split('/').pop() || ''}
+        onCopyShareable={copyShareableReportLink}
+        onCopyDirect={copyDirectReportLink}
+        onClose={() => setShareLinkFile(null)}
+      />
       {/* Left Side: Topbar + Sidebar + Chat Window */}
       <div className="flex flex-col flex-1 min-w-0">
         {/* Top bar */}
@@ -2497,6 +2594,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
                   }}
                   readOnly={isFlashMode}
                   singleFileMode={isFlashMode && !!filePanelWorkspaceId}
+                  onCopyShareLink={isFlashMode ? null : handleCopyShareLink}
                 />
                 </WorkspaceProvider>
               </Suspense>
@@ -2556,6 +2654,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
                       }}
                       readOnly={isFlashMode}
                       singleFileMode={isFlashMode && !!filePanelWorkspaceId}
+                      onCopyShareLink={isFlashMode ? null : handleCopyShareLink}
                     />
                     </WorkspaceProvider>
                   ) : rightPanelType === 'detail' && (detailToolCall || detailPlanData) ? (
