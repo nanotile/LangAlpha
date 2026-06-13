@@ -1775,9 +1775,12 @@ class TestIntermediateStartingStatus:
 
 
 class TestStatusRoutesToDbFallback:
-    """Smoke check: the status tuple the consumer modules (workspace_files,
-    public) compare against contains all three of stopped/stopping/starting.
-    A typo there would reproduce the 503 storm from the original incident."""
+    """Smoke check that the consumer modules route non-live workspaces to the
+    DB fallback instead of waking a sandbox. ``workspace_files`` (authenticated)
+    compares against the stopped/stopping/starting tuple; ``public``
+    (unauthenticated) uses the stronger ``status == "running"`` +
+    ``has_ready_session`` no-wake gate. A regression in either reproduces the
+    503 storm from the original incident (or, for public, a denial-of-wallet)."""
 
     @pytest.mark.parametrize("status", ["stopped", "stopping", "starting"])
     def test_workspace_files_tuple_includes_status(self, status):
@@ -1786,19 +1789,22 @@ class TestStatusRoutesToDbFallback:
 
         source = inspect.getsource(workspace_files)
         assert f'"{status}"' in source
-        # The exact tuple must remain in sync with public.py; if this ever
-        # has to change, grep for "stopped", "stopping", "starting" in both
-        # files and update together.
+        # The authenticated routes compare against this exact tuple.
         assert '"stopped", "stopping", "starting"' in source
 
-    @pytest.mark.parametrize("status", ["stopped", "stopping", "starting"])
-    def test_public_tuple_includes_status(self, status):
+    def test_public_routes_gate_on_ready_session(self):
+        """The unauthenticated shared file routes must read only a warm
+        in-memory session (``has_ready_session`` → cached session), never
+        ``get_session_for_workspace`` which would attach/restart a Daytona
+        sandbox for a share-token request (denial-of-wallet)."""
         from src.server.app import public
         import inspect
 
         source = inspect.getsource(public)
-        assert f'"{status}"' in source
-        assert '"stopped", "stopping", "starting"' in source
+        # list/read/download each gate on the pure in-memory readiness check
+        # and read the cached session directly rather than acquiring one.
+        assert source.count("has_ready_session(workspace_id)") >= 3
+        assert source.count("manager._sessions.get(workspace_id)") >= 3
 
 
 # ---------------------------------------------------------------------------
