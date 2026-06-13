@@ -1382,8 +1382,16 @@ async def serve_workspace_file(
         content = get_redactor().redact_bytes(content, vault_secrets=vault_secrets)
 
     if inject_theme and _is_html_content_type(content_type):
-        text = content.decode("utf-8", errors="replace")
-        content = _inject_theme_into_html(text).encode("utf-8")
+        # Only inject when the body is valid UTF-8. A non-UTF-8 HTML document
+        # (GBK/Shift-JIS, preserved losslessly by the latin-1 redaction fallback)
+        # would be corrupted by an errors="replace" decode-then-reencode, so
+        # serve it byte-faithful instead and skip theme sync for that rare case.
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            content = _inject_theme_into_html(text).encode("utf-8")
 
     headers = {
         "Content-Security-Policy": _WSFILES_CSP,

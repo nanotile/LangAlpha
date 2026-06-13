@@ -389,14 +389,12 @@ async def render_workspace_pdf(
 
             async def _ws_route_handler(ws_route):
                 # WebSockets are not covered by page.route, so gate them
-                # separately. No ws:// URL passes _is_request_allowed (it
+                # separately. No ws:// URL can pass _is_request_allowed (it
                 # requires the https serve prefix or an https CDN host), so
-                # this blocks every WS — closing the one egress channel the
-                # HTTP guard misses (e.g. ws://169.254.169.254, ws://127.0.0.1).
-                if _is_request_allowed(ws_route.url, workspace_serve_prefix):
-                    ws_route.connect_to_server()
-                else:
-                    await ws_route.close()
+                # every WS is closed unconditionally — sealing the one egress
+                # channel the HTTP guard misses (e.g. ws://169.254.169.254,
+                # ws://127.0.0.1). There is deliberately no connect path.
+                await ws_route.close()
 
             page = await context.new_page()
             await page.route("**/*", _route_handler)

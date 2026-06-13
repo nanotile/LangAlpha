@@ -465,6 +465,25 @@ async def test_plain_get_is_byte_faithful(mock_ws, mock_fp, _wd, _vault):
     assert b"widget:themeUpdate" not in resp.body
 
 
+@pytest.mark.asyncio
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_inject_theme_skips_non_utf8_html(mock_ws, mock_fp, _wd, _vault):
+    mock_ws.return_value = _workspace("stopped")
+    # GBK-encoded HTML (the body bytes \xb1\xa8\xb8\xe6 are invalid UTF-8).
+    # Injection must decline rather than corrupt it via an errors="replace"
+    # decode, so the document is served byte-faithful with no theme script.
+    gbk_html = b"<html><head></head><body>\xb1\xa8\xb8\xe6</body></html>"
+    mock_fp.get_file_content = AsyncMock(
+        return_value=_db_binary_record(gbk_html, mime="text/html")
+    )
+    resp = await serve_workspace_file(WS_ID, "results/report.html", inject_theme=True)
+    assert resp.body == gbk_html
+    assert b"widget:themeUpdate" not in resp.body
+
+
 # --- Endpoint wrapper: ?inject query param wiring -------------------------
 
 

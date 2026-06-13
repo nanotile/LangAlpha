@@ -112,6 +112,7 @@ function FileHeaderActions({
         filePath: selectedFile,
         servedUrl: htmlServedUrl,
         printHint: t('filePanel.pdfPrintHint'),
+        generatingHint: t('filePanel.pdfGenerating'),
         scale: pdfScale,
         pageNumbers: pdfPageNumbers,
         branding: pdfBranding,

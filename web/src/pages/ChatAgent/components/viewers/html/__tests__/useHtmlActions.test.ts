@@ -8,7 +8,8 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-const toastMock = vi.fn();
+const toastDismiss = vi.fn();
+const toastMock = vi.fn(() => ({ id: '1', dismiss: toastDismiss, update: vi.fn() }));
 vi.mock('@/components/ui/use-toast', () => ({
   toast: (...args: unknown[]) => toastMock(...args),
 }));
@@ -212,6 +213,7 @@ describe('useHtmlActions — file mode', () => {
     createSpy.mockRestore();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    toastDismiss.mockClear();
   });
 
   it('opens the served wsfiles URL (byte-faithful, no inject=theme)', () => {
@@ -256,7 +258,10 @@ describe('useHtmlActions — file mode', () => {
     expect(revokeObjectURL).toHaveBeenCalled();
     // No print fallback on the success path.
     expect(open).not.toHaveBeenCalled();
-    expect(toastMock).not.toHaveBeenCalled();
+    // The in-flight "generating" toast shows then clears; no print hint.
+    expect(toastMock).toHaveBeenCalledWith({ description: 'filePanel.pdfGenerating' });
+    expect(toastMock).not.toHaveBeenCalledWith({ description: 'filePanel.pdfPrintHint' });
+    expect(toastDismiss).toHaveBeenCalledTimes(1);
   });
 
   it('composes ?format=pdf onto the servedUrl override (share page)', async () => {
@@ -286,6 +291,7 @@ describe('useHtmlActions — file mode', () => {
       filePath: 'results/report.html',
       servedUrl: served,
       printHint: 'hint',
+      generatingHint: 'generating',
       scale: 0.8,
       pageNumbers: true,
       branding: false,
@@ -343,7 +349,8 @@ describe('useHtmlActions — file mode', () => {
     await result.current.exportPdf();
     expect(open).toHaveBeenCalledWith('/api/v1/wsfiles/ws-1/results/report.html', '_blank');
     expect(print).toHaveBeenCalled();
-    expect(toastMock).not.toHaveBeenCalled();
+    // Print succeeded → no print-hint toast (the generating toast still fires).
+    expect(toastMock).not.toHaveBeenCalledWith({ description: 'filePanel.pdfPrintHint' });
   });
 
   it('falls back to print + hint when fetch rejects', async () => {

@@ -56,6 +56,8 @@ export interface ExportServedPdfOptions {
   servedUrl?: string;
   /** Toast text shown when the print-dialog fallback can't auto-print. */
   printHint: string;
+  /** Toast shown while the server render is in flight (cleared when it settles). */
+  generatingHint: string;
   /** Render scale (server clamps to 0.5–2). 1 = default, omitted from the URL. */
   scale?: number;
   /** Draw an 'N / total' footer in the page margin. */
@@ -75,6 +77,7 @@ export async function exportServedPdf({
   filePath,
   servedUrl,
   printHint,
+  generatingHint,
   scale,
   pageNumbers,
   branding,
@@ -100,6 +103,9 @@ export async function exportServedPdf({
     }
   };
 
+  // Server renders take seconds — show a dismissible "generating" toast so the
+  // wait isn't silent, and clear it once the request settles either way.
+  const pending = toast({ description: generatingHint });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
   try {
@@ -122,6 +128,7 @@ export async function exportServedPdf({
     printFallback();
   } finally {
     clearTimeout(timeout);
+    pending.dismiss();
   }
 }
 
@@ -200,6 +207,7 @@ export function useHtmlActions(opts: UseHtmlActionsOptions): HtmlActions {
         filePath: opts.filePath,
         servedUrl: opts.servedUrl,
         printHint: t('filePanel.pdfPrintHint'),
+        generatingHint: t('filePanel.pdfGenerating'),
       });
     } finally {
       pdfInFlight.current = false;

@@ -1270,6 +1270,7 @@
     "htmlPreview": "Preview",
     "htmlSource": "Source",
     "pdfPrintHint": "Press Cmd/Ctrl-P to save the page as a PDF.",
+    "pdfGenerating": "Generating PDF…",
     "copyShareLink": "Copy link",
     "shareLinkCopied": "Shareable link copied to clipboard",
     "shareLinkFailed": "Couldn't copy the link",
