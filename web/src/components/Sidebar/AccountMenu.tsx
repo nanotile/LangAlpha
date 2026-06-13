@@ -181,6 +181,8 @@ const AccountMenu: React.FC = () => {
             </DropdownMenuItem>
           )}
 
+          <DropdownMenuSeparator />
+
           <DropdownMenuItem onSelect={() => navigate('/settings')}>
             <Settings className="h-4 w-4" />
             {t('sidebar.settings', 'Settings')}
