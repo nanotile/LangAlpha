@@ -733,7 +733,11 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
     const tid = currentThreadIdRef.current;
     if (!tid) return;
     try {
-      let status = threadIsShared ? await getThreadShareStatus(tid) : null;
+      // Always fetch live status — never gate on the possibly-stale
+      // threadIsShared flag. updateThreadSharing replaces the full permissions
+      // object, so spreading the *current* permissions is what preserves an
+      // existing allow_download when we add allow_files.
+      let status = await getThreadShareStatus(tid);
       if (!status?.is_shared || !status?.share_token) {
         status = await updateThreadSharing(tid, {
           is_shared: true,
@@ -758,7 +762,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
       console.error('[ChatView] Copy share link failed:', e);
       toast({ description: t('filePanel.shareLinkFailed'), variant: 'destructive' });
     }
-  }, [threadIsShared, t]);
+  }, [t]);
 
   // Save chat session on unmount for cross-tab restoration (workspace + thread only).
   // Only the active view saves — evicted hidden views must not overwrite (R1).

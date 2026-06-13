@@ -17,7 +17,15 @@ import {
   handleHistoryToolCallResult,
   handleHistoryTodoUpdate,
 } from '../ChatAgent/hooks/utils/historyEventHandlers';
-import { getSharedThread, replaySharedThread, getSharedFiles, readSharedFile, downloadSharedFileAs } from './api';
+import {
+  getSharedThread,
+  replaySharedThread,
+  getSharedFiles,
+  readSharedFile,
+  downloadSharedFileAs,
+  fetchSharedServeObjectUrl,
+  fetchSharedServeArrayBuffer,
+} from './api';
 import type { SharedThreadMetadata, SSEEvent } from './api';
 import { buildSharedServeUrl } from '../ChatAgent/components/viewers/html/wsfilesUrl';
 
@@ -334,16 +342,20 @@ export default function SharedChatView() {
     // HTML files read their full source here; the public read endpoint caps at
     // its own line limit, and the preview renders via the served URL regardless.
     readFileFull: (path: string) => readSharedFile(shareToken!, path),
-    downloadFile: (path: string) => downloadSharedFileAs(shareToken!, path, 'blob'),
-    downloadFileAsArrayBuffer: (path: string) => downloadSharedFileAs(shareToken!, path, 'arraybuffer'),
+    // Byte-access previews go through the serve endpoint (allow_files), matching
+    // the rendered report. Only the explicit save affordance uses the download
+    // endpoint (allow_download) — see fetchSharedServeObjectUrl docs.
+    downloadFile: (path: string) => fetchSharedServeObjectUrl(shareToken!, path),
+    downloadFileAsArrayBuffer: (path: string) => fetchSharedServeArrayBuffer(shareToken!, path),
     triggerDownload: (path: string) => downloadSharedFileAs(shareToken!, path, 'download'),
     buildServedUrl: (path: string, opts?: { injectTheme?: boolean }) =>
       buildSharedServeUrl(shareToken!, path, opts),
   }), [shareToken]);
 
-  // Image downloader for WorkspaceProvider — enables inline image rendering in markdown
+  // Inline markdown images render via the serve endpoint (allow_files) so they
+  // load on a copy-link share, which grants allow_files but not allow_download.
   const imageDownloader = useCallback(
-    (path: string) => downloadSharedFileAs(shareToken!, path, 'blob'),
+    (path: string) => fetchSharedServeObjectUrl(shareToken!, path),
     [shareToken],
   );
 
