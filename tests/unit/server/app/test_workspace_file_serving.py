@@ -324,6 +324,28 @@ async def test_running_db_row_but_cold_sandbox_uses_db_not_wake(
     mock_sb.assert_not_called()
 
 
+@pytest.mark.asyncio
+@patch(_WSMGR_PATCH, new=_warm_manager())
+@patch(_FP_PATCH)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_SANDBOX_PATCH, new_callable=AsyncMock)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_warm_session_dies_falls_back_to_db_not_503(
+    mock_ws, mock_sb, _wd, _vault, mock_fp
+):
+    # TOCTOU: has_ready_session() reported warm, but the session died before
+    # _acquire_sandbox(), which then raises HTTPException(503). The serve route
+    # must absorb that and fall back to the DB record — never leak a 503, which
+    # would break the uniform-404 contract and confirm the UUID is valid.
+    mock_ws.return_value = _workspace("running")
+    mock_sb.side_effect = HTTPException(status_code=503, detail="Sandbox not ready")
+    mock_fp.get_file_content = AsyncMock(return_value=_db_text_record("from-db"))
+    resp = await serve_workspace_file(WS_ID, "results/x.html", inject_theme=False)
+    assert resp.status_code == 200
+    assert b"from-db" in resp.body
+
+
 # --- CSP + cache headers present on every response ------------------------
 
 

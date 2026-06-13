@@ -85,6 +85,11 @@ _RENDER_SEMAPHORE = asyncio.Semaphore(2)
 # below this so a slow asset can fall back to "load" and still finish.
 _RENDER_TIMEOUT_MS = 30_000
 _GOTO_TIMEOUT_MS = 20_000
+# The fallback goto only runs after the networkidle goto already burned most of
+# the outer _RENDER_TIMEOUT_MS budget, so it gets a shorter cap that fits the
+# remaining window rather than a full _GOTO_TIMEOUT_MS the outer wait_for would
+# pre-empt anyway.
+_GOTO_FALLBACK_TIMEOUT_MS = 10_000
 
 # Letter paper at CSS 96dpi (8.5x11in). The viewport must match the print
 # width so responsive layouts and chart canvases render at paper size from
@@ -413,7 +418,7 @@ async def render_workspace_pdf(
                 except PlaywrightTimeoutError:
                     # Networkidle never settled (long-polling asset, etc.) —
                     # fall back to a plain load and render what we have.
-                    await page.goto(internal_url, wait_until="load", timeout=_GOTO_TIMEOUT_MS)
+                    await page.goto(internal_url, wait_until="load", timeout=_GOTO_FALLBACK_TIMEOUT_MS)
                 declared_size = await page.evaluate(_PAGE_SIZE_PROBE_JS)
                 viewport = _viewport_from_page_size(declared_size) if declared_size else None
                 if viewport and viewport != _PRINT_VIEWPORT:

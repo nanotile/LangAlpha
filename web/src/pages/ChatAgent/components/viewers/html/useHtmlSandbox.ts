@@ -31,6 +31,8 @@ export function useHtmlSandbox({
   const pushTheme = useCallback(() => {
     const win = iframeRef.current?.contentWindow;
     if (!win) return;
+    // Target '*' is intentional: `sandbox allow-scripts` (no allow-same-origin)
+    // gives the iframe an opaque origin, which can't be named as a targetOrigin.
     win.postMessage({ type: 'widget:themeUpdate', css: resolveThemeVars() }, '*');
   }, [iframeRef]);
 

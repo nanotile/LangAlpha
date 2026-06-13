@@ -1122,8 +1122,10 @@ async def delete_workspace_files(
 wsfiles_router = APIRouter(prefix="/api/v1", tags=["Workspace File Serving"])
 
 # Short private cache: HTML reports and their assets are effectively immutable
-# for a turn, but the workspace UUID is a bearer credential so we never allow
-# shared/public caches to retain the bytes.
+# for a turn, so up to 60s of staleness on reload (until the next agent update
+# is picked up) is an acceptable trade for far fewer sandbox/DB reads. The
+# workspace UUID is a bearer credential, so we never allow shared/public caches
+# to retain the bytes.
 _WSFILES_CACHE_CONTROL = "private, max-age=60"
 
 # Content-Security-Policy for served reports. Two jobs:
@@ -1311,8 +1313,15 @@ async def _resolve_serve_bytes(
     if not warm:
         return await _db_fallback_bytes(workspace_id, normalized_path, extension_mime)
 
-    # Warm sandbox — read live bytes without any Daytona start/reconnect.
-    sandbox = await _acquire_sandbox(workspace_id, workspace.get("user_id") or "")
+    # Warm sandbox — read live bytes without any Daytona start/reconnect. If
+    # the session died between has_ready_session() above and here (TOCTOU),
+    # _acquire_sandbox raises 503; absorb it and fall back to the DB record so
+    # the route keeps its uniform-404 posture instead of leaking a 503 that
+    # would confirm the workspace UUID is valid.
+    try:
+        sandbox = await _acquire_sandbox(workspace_id, workspace.get("user_id") or "")
+    except HTTPException:
+        return await _db_fallback_bytes(workspace_id, normalized_path, extension_mime)
     candidate, error = sandbox.validate_and_normalize_path(normalized_path)
     if error:
         return None
