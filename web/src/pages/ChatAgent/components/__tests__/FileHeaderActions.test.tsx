@@ -262,6 +262,7 @@ describe('FileHeaderActions', () => {
         filePath: 'results/report.html',
         servedUrl: '/api/v1/public/shared/tok-1/files/serve/results/report.html',
         printHint: 'filePanel.pdfPrintHint',
+        generatingHint: 'filePanel.pdfGenerating',
         scale: 1,
         pageNumbers: false,
         branding: true,
