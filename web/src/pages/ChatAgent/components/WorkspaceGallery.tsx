@@ -19,6 +19,7 @@ import { createWorkspace, deleteWorkspace, getFlashWorkspace, updateWorkspace, r
 import { removeStoredThreadId } from '../hooks/useChatMessages';
 import { clearAllMarketThreadsForWorkspace } from '../../MarketView/utils/threadPersistence';
 import { forgetNavPanelExpansion } from './NavigationPanel';
+import { forgetStableNavOrder } from '../hooks/useNavigationData';
 import { clearChatSession } from '../hooks/utils/chatSessionRestore';
 
 const DEFAULT_PAGE_SIZE = 8;
@@ -31,6 +32,12 @@ interface WorkspaceRecord {
   is_pinned?: boolean;
   sort_order?: number;
   updated_at?: string;
+  [key: string]: unknown;
+}
+
+// Shape of a cached workspace-list query entry (queryKeys.workspaces.lists()).
+interface CachedWorkspaceList {
+  workspaces: WorkspaceRecord[];
   [key: string]: unknown;
 }
 
@@ -561,8 +568,10 @@ function WorkspaceGallery({ onWorkspaceSelect, prefetchThreads }: WorkspaceGalle
       removeStoredThreadId(workspaceId);
       clearAllMarketThreadsForWorkspace(workspaceId);
       // Drop the nav panel's remembered expansion so a later remount doesn't
-      // re-expand the now-deleted workspace and fire a spurious threads 404.
+      // re-expand the now-deleted workspace and fire a spurious threads 404,
+      // and clear its frozen-order entries so they don't linger all session.
       forgetNavPanelExpansion(workspaceId);
+      forgetStableNavOrder(workspaceId);
 
       // Invalidate workspace list cache
       queryClient.invalidateQueries({ queryKey: queryKeys.workspaces.lists() });
@@ -608,15 +617,15 @@ function WorkspaceGallery({ onWorkspaceSelect, prefetchThreads }: WorkspaceGalle
 
     // Snapshot + optimistic flip across all cached workspace lists
     const previous = queryClient.getQueriesData({ queryKey: queryKeys.workspaces.lists() });
-    previous.forEach(([key, data]: [unknown, any]) => {
-      if (data?.workspaces) {
-        queryClient.setQueryData(key as any, {
-          ...data,
-          workspaces: data.workspaces.map((ws: WorkspaceRecord) =>
-            ws.workspace_id === wsId ? { ...ws, is_pinned: newPinned } : ws
-          ),
-        });
-      }
+    previous.forEach(([key, data]: [unknown, unknown]) => {
+      const d = data as CachedWorkspaceList | undefined;
+      if (!d?.workspaces) return;
+      queryClient.setQueryData(key as readonly unknown[], {
+        ...d,
+        workspaces: d.workspaces.map((ws) =>
+          ws.workspace_id === wsId ? { ...ws, is_pinned: newPinned } : ws
+        ),
+      });
     });
 
     try {
@@ -630,7 +639,7 @@ function WorkspaceGallery({ onWorkspaceSelect, prefetchThreads }: WorkspaceGalle
       queryClient.invalidateQueries({ queryKey: queryKeys.workspaces.lists() });
     } catch (err) {
       // Rollback optimistic update
-      previous.forEach(([key, data]: [unknown, any]) => queryClient.setQueryData(key as any, data));
+      previous.forEach(([key, data]: [unknown, unknown]) => queryClient.setQueryData(key as readonly unknown[], data));
       console.error('Error toggling pin:', err);
     }
   };
@@ -661,15 +670,15 @@ function WorkspaceGallery({ onWorkspaceSelect, prefetchThreads }: WorkspaceGalle
     if (!trimmed) return;
 
     const previous = queryClient.getQueriesData({ queryKey: queryKeys.workspaces.lists() });
-    previous.forEach(([key, data]: [unknown, any]) => {
-      if (data?.workspaces) {
-        queryClient.setQueryData(key as any, {
-          ...data,
-          workspaces: data.workspaces.map((ws: WorkspaceRecord) =>
-            ws.workspace_id === wsId ? { ...ws, name: trimmed } : ws
-          ),
-        });
-      }
+    previous.forEach(([key, data]: [unknown, unknown]) => {
+      const d = data as CachedWorkspaceList | undefined;
+      if (!d?.workspaces) return;
+      queryClient.setQueryData(key as readonly unknown[], {
+        ...d,
+        workspaces: d.workspaces.map((ws) =>
+          ws.workspace_id === wsId ? { ...ws, name: trimmed } : ws
+        ),
+      });
     });
 
     try {
@@ -677,7 +686,7 @@ function WorkspaceGallery({ onWorkspaceSelect, prefetchThreads }: WorkspaceGalle
       queryClient.invalidateQueries({ queryKey: queryKeys.workspaces.lists() });
       queryClient.invalidateQueries({ queryKey: queryKeys.workspaces.detail(wsId) });
     } catch (err) {
-      previous.forEach(([key, data]: [unknown, any]) => queryClient.setQueryData(key as any, data));
+      previous.forEach(([key, data]: [unknown, unknown]) => queryClient.setQueryData(key as readonly unknown[], data));
       console.error('Error renaming workspace:', err);
     }
   };

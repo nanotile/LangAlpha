@@ -50,6 +50,7 @@
   "nav": {
     "pin": "Pin panel",
     "unpin": "Unpin panel",
+    "minimize": "Minimize panel",
     "displayOptions": "Display options",
     "newThread": "New thread",
     "orderBy": "Order by",

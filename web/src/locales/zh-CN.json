@@ -50,6 +50,7 @@
   "nav": {
     "pin": "固定面板",
     "unpin": "取消固定",
+    "minimize": "最小化面板",
     "displayOptions": "显示选项",
     "newThread": "新建对话",
     "orderBy": "排序方式",

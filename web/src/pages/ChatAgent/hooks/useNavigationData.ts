@@ -59,6 +59,19 @@ export function resetStableNavOrder() {
   _lastWorkspaceArrangement.clear();
 }
 
+// Drop a deleted workspace from the frozen-order stores so they don't retain
+// ghost ids for the rest of the session. Deleted ids are already filtered out
+// of the rendered list (applyStableOrderBy drops map-misses), so this is
+// housekeeping, not a correctness fix — call it from the workspace delete path.
+export function forgetStableNavOrder(workspaceId: string) {
+  delete _frozenThreadOrders[workspaceId];
+  _lastWorkspaceArrangement.delete(workspaceId);
+  if (_frozenWorkspaceOrder) {
+    const idx = _frozenWorkspaceOrder.indexOf(workspaceId);
+    if (idx !== -1) _frozenWorkspaceOrder.splice(idx, 1);
+  }
+}
+
 // Bump notifications: chatting in a thread moves it to the top of its
 // workspace's list (like normal chat apps), while clicking around never
 // reorders. Subscribed hooks re-apply the frozen orders when the version ticks.
@@ -186,6 +199,14 @@ export function useNavigationData(currentWorkspaceId: string) {
   // Workspace list in server order (pinned first, then manual sort_order, then
   // recency), frozen to its first-session arrangement so the active workspace's
   // updated_at bumps (which reorder the server response) don't hoist it.
+  //
+  // NOTE: this memo intentionally reads AND writes the module-level frozen-order
+  // stores during render (an impure useMemo). That is safe ONLY because this
+  // tree renders synchronously — no StrictMode, no useTransition/Suspense on the
+  // nav path — so the factory runs once per render and can't interleave or be
+  // discarded. If concurrent features are ever adopted on this path, rework the
+  // ordering subsystem (this memo + orderThreads + reorderWorkspace) to
+  // pure-compute + an effect-commit before they can tear the snapshot.
   const workspaces = useMemo(() => {
     if (!allFetched.length) return [];
 

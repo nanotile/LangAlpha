@@ -21,6 +21,9 @@ export interface NavDisplayPrefs {
 const STORAGE_KEY = 'nav.display';
 
 export const NAV_PREFS_DEFAULTS: NavDisplayPrefs = {
+  // 'all' by default so the nav reads as a browsable workspace tree. Only names
+  // are paged (100 at a time beyond the first 20) and threads stay lazy per
+  // expand, so the first-load cost is metadata-only — intentional, not a cap bug.
   workspaceLimit: 'all',
   threadPageSize: 10,
   orderBy: 'custom',

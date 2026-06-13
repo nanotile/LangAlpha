@@ -2116,7 +2116,8 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
                             alignItems: 'center',
                             justifyContent: 'center',
                           }}
-                          title={!isMobile && navPinned ? t('nav.unpin') : 'Minimize panel'}
+                          title={!isMobile && navPinned ? t('nav.unpin') : t('nav.minimize')}
+                          aria-label={!isMobile && navPinned ? t('nav.unpin') : t('nav.minimize')}
                         >
                           <Minus className="h-4 w-4" style={{ color: 'var(--color-text-tertiary)' }} />
                         </button>
