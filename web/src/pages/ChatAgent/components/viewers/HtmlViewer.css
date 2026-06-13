@@ -37,6 +37,11 @@
   background: var(--color-border-muted);
 }
 
+.html-viewer-tab:focus-visible {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 1px;
+}
+
 .html-viewer-tab.active {
   color: var(--color-text-primary);
   background: var(--color-accent-soft);

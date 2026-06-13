@@ -10,7 +10,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 12px;
+  /* Extra right padding clears the dialog's absolutely-positioned close (×),
+     which floats at right: 16px over this toolbar. */
+  padding: 8px 44px 8px 12px;
   border-bottom: 1px solid var(--color-border-muted);
   flex-shrink: 0;
 }

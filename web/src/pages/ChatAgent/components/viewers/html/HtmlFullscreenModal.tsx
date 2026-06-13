@@ -57,9 +57,9 @@ export default function HtmlFullscreenModal(props: HtmlFullscreenModalProps) {
         <div className="html-fullscreen-body">
           <div className="html-fullscreen-toolbar">
             <span className="html-fullscreen-title" title={title}>{title}</span>
+            {/* No exit-fullscreen button here — the dialog's own close (×) is
+                the canonical close, so a second one would overlap it. */}
             <HtmlActionBar
-              onFullscreen={() => onOpenChange(false)}
-              isFullscreen
               onOpenInNewTab={actions.openInNewTab}
               onDownload={actions.downloadHtml}
               onExportPdf={actions.exportPdf}

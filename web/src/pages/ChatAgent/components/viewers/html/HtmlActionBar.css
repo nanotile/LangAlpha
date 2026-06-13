@@ -22,6 +22,11 @@
   background: var(--color-bg-hover);
 }
 
+.html-action-btn:focus-visible {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 1px;
+}
+
 /* Overlay variant: hover-revealed bar floated over the inline-widget iframe. */
 .html-action-bar-overlay {
   position: absolute;

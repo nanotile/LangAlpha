@@ -198,5 +198,3 @@ export function useHtmlActions(opts: UseHtmlActionsOptions): HtmlActions {
 
   return { openInNewTab, downloadHtml, exportPdf };
 }
-
-export { fileNameFromPath };
