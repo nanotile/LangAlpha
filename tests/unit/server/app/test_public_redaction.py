@@ -414,6 +414,52 @@ class TestServeSharedFile:
         assert resp.status_code == 404
 
 
+class TestServeSharedFileErrorPage:
+    """A revoked/forbidden shared link renders a branded HTML page for browsers,
+    but keeps the raw JSON error for programmatic (non-HTML) clients."""
+
+    _SERVE = "/api/v1/public/shared/revoked-token/files/serve/results/report.html"
+
+    async def test_revoked_renders_html_page_for_browser(self, public_client):
+        with patch(_THREAD_BY_TOKEN, AsyncMock(return_value=None)):
+            resp = await public_client.get(self._SERVE, headers={"Accept": "text/html"})
+        assert resp.status_code == 404
+        assert resp.headers["content-type"].startswith("text/html")
+        assert resp.headers["cache-control"] == "no-store"
+        # A real page, not the raw FastAPI JSON detail.
+        assert b"This shared report" in resp.content
+        assert b'href="/"' in resp.content
+        assert b'"detail"' not in resp.content
+
+    async def test_revoked_keeps_json_for_api_client(self, public_client):
+        # Default httpx Accept is */* (no text/html) → JSON error preserved.
+        with patch(_THREAD_BY_TOKEN, AsyncMock(return_value=None)):
+            resp = await public_client.get(self._SERVE)
+        assert resp.status_code == 404
+        assert resp.headers["content-type"].startswith("application/json")
+        assert resp.json()["detail"] == "Shared thread not found"
+
+    async def test_forbidden_renders_permission_page_for_browser(self, public_client):
+        thread = _make_thread(share_permissions={"allow_files": False})
+        with patch(_THREAD_BY_TOKEN, AsyncMock(return_value=thread)):
+            resp = await public_client.get(
+                f"/api/v1/public/shared/{_SHARE_TOKEN}/files/serve/results/report.html",
+                headers={"Accept": "text/html"},
+            )
+        assert resp.status_code == 403
+        assert resp.headers["content-type"].startswith("text/html")
+        assert b"file access" in resp.content
+
+    async def test_error_page_localizes_to_chinese(self, public_client):
+        with patch(_THREAD_BY_TOKEN, AsyncMock(return_value=None)):
+            resp = await public_client.get(
+                self._SERVE,
+                headers={"Accept": "text/html", "Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+        assert resp.status_code == 404
+        assert "此分享报告不可用".encode() in resp.content
+
+
 class TestServeSharedFilePdf:
     """?format=pdf over a share token — renderer is mocked (no Chromium in CI)."""
 
