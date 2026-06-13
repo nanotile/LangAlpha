@@ -1063,7 +1063,9 @@ function Settings() {
                       </div>
                     </div>
                     <p className="text-xs mt-2" style={{ color: 'var(--color-text-tertiary)' }}>
-                      {t('settings.outputFormatDescription')}
+                      {outputFormat === 'html'
+                        ? t('settings.outputFormatDescriptionHtml')
+                        : t('settings.outputFormatDescriptionDefault')}
                     </p>
                   </div>
                 );
