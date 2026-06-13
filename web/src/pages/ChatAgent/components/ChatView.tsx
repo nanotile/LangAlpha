@@ -11,7 +11,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/queryKeys';
 import { updateCurrentUser } from '../../Dashboard/utils/api';
 import { softInterruptWorkflow, getWorkspace, summarizeThread, offloadThread, getPreviewUrl, getThreadShareStatus, updateThreadSharing } from '../utils/api';
-import { buildSharedServeUrl } from './viewers/html/wsfilesUrl';
+import { buildSharedServeUrl, buildWsfilesUrl } from './viewers/html/wsfilesUrl';
+import ShareReportLinkModal from './ShareReportLinkModal';
 import { toast } from '@/components/ui/use-toast';
 import { mergeWarmingDisplay } from '../utils/warmWorkspace';
 import { useChatMessages } from '../hooks/useChatMessages';
@@ -724,19 +725,24 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   // Keep resolvedThreadIdRef in sync with the resolved thread ID from useChatMessages
   resolvedThreadIdRef.current = currentThreadId || threadId;
 
-  // Copy a shareable link to an HTML report. Enables thread sharing (with file
-  // browsing) on first use, then copies a direct link to the file served as its
-  // own full-tab page — `${origin}/api/v1/public/shared/{token}/files/serve/<path>`,
-  // not a deep link into the conversation view. The share token (not the
-  // workspace UUID) scopes access and stays revocable.
-  const handleCopyShareLink = useCallback(async (filePath: string) => {
+  // Copy-a-link to an HTML report opens a consent chooser; the actual copy runs
+  // in one of the two handlers below depending on the user's pick.
+  const [shareLinkFile, setShareLinkFile] = useState<string | null>(null);
+
+  const handleCopyShareLink = useCallback((filePath: string) => {
+    setShareLinkFile(filePath);
+  }, []);
+
+  // Shareable link: public, revocable, token-scoped. Enables thread sharing
+  // with allow_files on first use (always fetching live status first, so
+  // spreading the current permissions preserves any existing allow_download
+  // rather than clearing it), then copies the public serve URL. Throws on
+  // failure so the chooser stays open.
+  const copyShareableReportLink = useCallback(async () => {
+    const filePath = shareLinkFile;
     const tid = currentThreadIdRef.current;
-    if (!tid) return;
+    if (!filePath || !tid) return;
     try {
-      // Always fetch live status — never gate on the possibly-stale
-      // threadIsShared flag. updateThreadSharing replaces the full permissions
-      // object, so spreading the *current* permissions is what preserves an
-      // existing allow_download when we add allow_files.
       let status = await getThreadShareStatus(tid);
       if (!status?.is_shared || !status?.share_token) {
         status = await updateThreadSharing(tid, {
@@ -759,10 +765,29 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
       await navigator.clipboard.writeText(url);
       toast({ description: t('filePanel.shareLinkCopied') });
     } catch (e) {
-      console.error('[ChatView] Copy share link failed:', e);
+      console.error('[ChatView] Copy shareable link failed:', e);
       toast({ description: t('filePanel.shareLinkFailed'), variant: 'destructive' });
+      throw e;
     }
-  }, [t]);
+  }, [shareLinkFile, t]);
+
+  // Direct link: the raw wsfiles URL (workspace UUID is the credential). Renders
+  // the file full screen. No sharing is enabled, but the link is not revocable
+  // and reaches the whole workspace. Throws on failure so the chooser stays open.
+  const copyDirectReportLink = useCallback(async () => {
+    const filePath = shareLinkFile;
+    if (!filePath) return;
+    try {
+      const served = buildWsfilesUrl(workspaceId, filePath);
+      const url = /^https?:\/\//i.test(served) ? served : `${window.location.origin}${served}`;
+      await navigator.clipboard.writeText(url);
+      toast({ description: t('filePanel.directLinkCopied') });
+    } catch (e) {
+      console.error('[ChatView] Copy direct link failed:', e);
+      toast({ description: t('filePanel.shareLinkFailed'), variant: 'destructive' });
+      throw e;
+    }
+  }, [shareLinkFile, workspaceId, t]);
 
   // Save chat session on unmount for cross-tab restoration (workspace + thread only).
   // Only the active view saves — evicted hidden views must not overwrite (R1).
@@ -1975,6 +2000,13 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
       <div aria-live="polite" aria-atomic="false" className="sr-only">
         {recentlyCompletedAnnouncement}
       </div>
+      <ShareReportLinkModal
+        open={shareLinkFile !== null}
+        fileName={shareLinkFile?.split('/').pop() || ''}
+        onCopyShareable={copyShareableReportLink}
+        onCopyDirect={copyDirectReportLink}
+        onClose={() => setShareLinkFile(null)}
+      />
       {/* Left Side: Topbar + Sidebar + Chat Window */}
       <div className="flex flex-col flex-1 min-w-0">
         {/* Top bar */}
