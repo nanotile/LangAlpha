@@ -7,8 +7,6 @@ MCP config and redacts them in text and bytes content.
 import os
 from unittest.mock import patch
 
-import pytest
-
 from src.server.utils.secret_redactor import SecretRedactor, get_redactor
 
 # Patch targets (imported inside SecretRedactor.__init__)
