@@ -39,6 +39,19 @@ _RENDER_PATCH = "src.server.services.pdf_render.render_workspace_pdf"
 _PDF_INTERNAL_BASE = "http://127.0.0.1:8000"
 
 
+def _assert_report_csp(csp: str) -> None:
+    """Assert the served-report CSP keeps the sandbox AND caps egress.
+
+    Checks shape, not the exact string, so directive ordering can change freely.
+    """
+    assert csp.startswith("sandbox allow-scripts;")
+    assert "default-src 'none'" in csp
+    assert "connect-src 'none'" in csp  # the load-bearing exfiltration block
+    # Google Fonts stays allowed for the CJK web-font path.
+    assert "https://fonts.googleapis.com" in csp
+    assert "https://fonts.gstatic.com" in csp
+
+
 def _warm_manager() -> MagicMock:
     """A WorkspaceManager whose cached session reports ready (live-read path)."""
     mgr = MagicMock()
@@ -323,7 +336,7 @@ async def test_csp_header_present_on_html(mock_ws, mock_fp, _wd, _vault):
     mock_ws.return_value = _workspace("stopped")
     mock_fp.get_file_content = AsyncMock(return_value=_db_text_record("<html></html>"))
     resp = await serve_workspace_file(WS_ID, "results/report.html", inject_theme=False)
-    assert resp.headers["Content-Security-Policy"] == "sandbox allow-scripts"
+    _assert_report_csp(resp.headers["Content-Security-Policy"])
     assert resp.headers["Cache-Control"] == "private, max-age=60"
     assert resp.headers["Content-Disposition"].startswith("inline")
     assert "attachment" not in resp.headers["Content-Disposition"]
@@ -339,7 +352,7 @@ async def test_csp_header_present_on_binary(mock_ws, mock_fp, _wd, _vault):
     mock_fp.get_file_content = AsyncMock(return_value=_db_binary_record(b"\x89PNGbytes"))
     resp = await serve_workspace_file(WS_ID, "results/chart.png", inject_theme=False)
     # CSP is on EVERY response, not just HTML.
-    assert resp.headers["Content-Security-Policy"] == "sandbox allow-scripts"
+    _assert_report_csp(resp.headers["Content-Security-Policy"])
     assert resp.headers["Cache-Control"] == "private, max-age=60"
 
 
@@ -678,3 +691,93 @@ async def test_unknown_format_serves_normally(mock_ws, mock_fp, _wd, _vault, moc
     assert resp.media_type == "text/html; charset=utf-8"
     assert resp.body == html.encode()
     mock_render.assert_not_awaited()
+
+
+# --- ?format=pdf: internal-URL encoding (P2) ------------------------------
+#
+# normalized_path is interpolated into the internal wsfiles URL handed to
+# headless Chromium. URL metacharacters and non-ASCII (CJK) must be UTF-8
+# percent-encoded so Chromium hits the right file; slashes stay literal so the
+# path structure survives. The serve endpoint decodes the segments back.
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_encodes_url_metacharacters(
+    mock_ws, mock_fp, _wd, _vault, mock_render
+):
+    mock_ws.return_value = _workspace("stopped")
+    mock_fp.get_file_content = AsyncMock(
+        return_value=_db_text_record("<html><body>x</body></html>")
+    )
+    mock_render.return_value = b"%PDF-1.7 fake"
+
+    # A space and a '#' in the filename would otherwise truncate/misroute.
+    await serve_workspace_file_endpoint(
+        workspace_id=WS_ID,
+        path="results/Q4 report#draft.html",
+        inject=None,
+        format="pdf",
+    )
+
+    internal_url = mock_render.await_args.args[0]
+    assert internal_url == (
+        f"{_PDF_INTERNAL_BASE}/api/v1/wsfiles/{WS_ID}/"
+        "results/Q4%20report%23draft.html"
+    )
+    # Slashes preserved, no raw space or '#' leaked into the URL.
+    assert " " not in internal_url and "#" not in internal_url
+
+
+@pytest.mark.asyncio
+@patch(_RENDER_PATCH, new_callable=AsyncMock)
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_format_pdf_encodes_cjk_filename(
+    mock_ws, mock_fp, _wd, _vault, mock_render
+):
+    mock_ws.return_value = _workspace("stopped")
+    mock_fp.get_file_content = AsyncMock(
+        return_value=_db_text_record("<html><body>报告</body></html>")
+    )
+    mock_render.return_value = b"%PDF-1.7 fake"
+
+    # A CJK-named report (neutral placeholder name).
+    await serve_workspace_file_endpoint(
+        workspace_id=WS_ID,
+        path="results/报告.html",
+        inject=None,
+        format="pdf",
+    )
+
+    internal_url = mock_render.await_args.args[0]
+    # UTF-8 percent-encoding of 报告; the leading dir + '/' stay literal.
+    assert internal_url == (
+        f"{_PDF_INTERNAL_BASE}/api/v1/wsfiles/{WS_ID}/"
+        "results/%E6%8A%A5%E5%91%8A.html"
+    )
+    serve_prefix = mock_render.await_args.kwargs["workspace_serve_prefix"]
+    assert serve_prefix == _EXPECTED_SERVE_PREFIX
+
+
+@pytest.mark.asyncio
+@patch(_VAULT_PATCH, new_callable=AsyncMock, return_value={})
+@patch(_WD_PATCH, return_value="/home/workspace")
+@patch(_FP_PATCH)
+@patch(_DBWS_PATCH, new_callable=AsyncMock)
+async def test_serves_cjk_named_html_file(mock_ws, mock_fp, _wd, _vault):
+    # The serve path receives the already-decoded unicode path (FastAPI decodes
+    # the {path:path} segment) and must resolve + serve it as UTF-8.
+    mock_ws.return_value = _workspace("stopped")
+    html = "<html><head></head><body>季度报告</body></html>"
+    mock_fp.get_file_content = AsyncMock(return_value=_db_text_record(html))
+    resp = await serve_workspace_file(WS_ID, "results/报告.html", inject_theme=False)
+    assert resp.status_code == 200
+    assert resp.media_type == "text/html; charset=utf-8"
+    assert "季度报告".encode() in resp.body

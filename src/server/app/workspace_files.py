@@ -32,6 +32,7 @@ import mimetypes
 import re
 import shlex
 from typing import Any
+from urllib.parse import quote
 
 from charset_normalizer import from_bytes
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
@@ -1123,9 +1124,33 @@ wsfiles_router = APIRouter(prefix="/api/v1", tags=["Workspace File Serving"])
 # shared/public caches to retain the bytes.
 _WSFILES_CACHE_CONTROL = "private, max-age=60"
 
-# Forces an opaque origin even though the iframe loads via `src=`, so
-# agent/prompt-injected HTML can never reach app cookies/localStorage.
-_WSFILES_CSP = "sandbox allow-scripts"
+# Content-Security-Policy for served reports. Two jobs:
+#   1. `sandbox allow-scripts` forces an opaque origin even though the iframe
+#      loads via `src=`, so agent/prompt-injected HTML can never reach app
+#      cookies/localStorage.
+#   2. The source directives cap egress to the html-report skill's CDN
+#      allowlist. `connect-src 'none'` is the load-bearing block: no
+#      fetch/XHR/beacon/websocket, so a prompt-injected report cannot exfiltrate
+#      its own contents. The skill embeds data inline, so this costs nothing.
+# `'self'` keeps relative subresources (charts/foo.png, app.js) working;
+# `'unsafe-inline'` is required because reports inline their JS/CSS and the
+# server splices an inline theme-sync script for `?inject=theme`. Google Fonts
+# stays allowed for the CJK web-font path (Noto Sans SC/JP/KR -> tofu without it).
+_WSFILES_CSP = (
+    "sandbox allow-scripts; "
+    "default-src 'none'; "
+    "script-src 'self' 'unsafe-inline' "
+    "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net "
+    "https://unpkg.com https://esm.sh; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com "
+    "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com; "
+    "connect-src 'none'; "
+    "frame-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
 
 # Explicit MIME map for common web asset types. mimetypes' platform tables are
 # inconsistent for several of these (notably .js, .mjs, .woff2), so we pin them.
@@ -1312,8 +1337,8 @@ async def serve_workspace_file(
 
     Resolves the file (running sandbox first, DB fallback for stopped
     workspaces), picks the Content-Type, redacts vault secrets from text
-    bodies, and emits ``Content-Security-Policy: sandbox allow-scripts`` on
-    every response. When ``inject_theme`` is set and the body is HTML, a small
+    bodies, and emits the sandboxed, egress-capped ``_WSFILES_CSP`` on every
+    response. When ``inject_theme`` is set and the body is HTML, a small
     theme-sync ``<script>`` is spliced after ``<head>``; otherwise the bytes
     are served faithfully. Missing/unknown/traversal inputs all raise a uniform
     404 so the endpoint never reveals which check failed.
@@ -1414,7 +1439,11 @@ async def render_workspace_file_pdf(
     from src.server.services import pdf_render
 
     base = PDF_RENDER_INTERNAL_BASE.rstrip("/")
-    internal_url = f"{base}/api/v1/wsfiles/{workspace_id}/{normalized_path}"
+    # Percent-encode the path (UTF-8) so metacharacters (#, ?, space) and
+    # non-ASCII (CJK) survive into headless Chromium; keep `/` so the path
+    # structure stays intact. The wsfiles endpoint decodes it back to unicode.
+    encoded_path = quote(normalized_path, safe="/")
+    internal_url = f"{base}/api/v1/wsfiles/{workspace_id}/{encoded_path}"
     serve_prefix = f"{base}/api/v1/wsfiles/{workspace_id}/"
     try:
         pdf_bytes = await pdf_render.render_workspace_pdf(

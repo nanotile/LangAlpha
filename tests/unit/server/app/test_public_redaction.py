@@ -354,7 +354,14 @@ class TestServeSharedFile:
             )
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "text/html; charset=utf-8"
-        assert resp.headers["content-security-policy"] == "sandbox allow-scripts"
+        # Keep the sandbox AND cap egress (connect-src 'none'); assert shape, not
+        # the exact string, so directive ordering can change freely.
+        csp = resp.headers["content-security-policy"]
+        assert csp.startswith("sandbox allow-scripts;")
+        assert "default-src 'none'" in csp
+        assert "connect-src 'none'" in csp
+        assert "https://fonts.googleapis.com" in csp  # CJK web-font path
+        assert "https://fonts.gstatic.com" in csp
         assert b"shared report" in resp.content
         # The workspace UUID must never leak into the response headers.
         for value in resp.headers.values():
