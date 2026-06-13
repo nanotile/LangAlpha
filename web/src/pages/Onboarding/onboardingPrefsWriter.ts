@@ -113,7 +113,7 @@ export function useOnboardingPrefsWriter() {
         }
       );
     },
-    [mutate, queryClient, currentUserId]
+    [mutate, currentUserId]
   );
 
   const writeOnboardingPrefs = useCallback(
