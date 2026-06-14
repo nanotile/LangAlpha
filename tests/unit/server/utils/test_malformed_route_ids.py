@@ -64,6 +64,9 @@ def test_list_endpoints_without_id_are_not_flagged():
     assert find_malformed_route_ids("/api/v1/threads") == []
 
 
-def test_url_encoded_segment_is_decoded_before_check():
-    findings = find_malformed_route_ids("/api/v1/workspaces/my%20file.md")
+def test_already_decoded_segment_is_flagged_verbatim():
+    # ASGI delivers scope["path"] already percent-decoded, so the function
+    # receives literal characters (a space, not %20) and flags the value
+    # verbatim — no second decode.
+    findings = find_malformed_route_ids("/api/v1/workspaces/my file.md")
     assert findings == [("workspace_path_id", "my file.md")]

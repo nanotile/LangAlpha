@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from typing import Annotated, Callable, Optional, TypeVar
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -180,12 +180,15 @@ def find_malformed_route_ids(
         ):
             findings.append((slot, value))
 
+    # scope["path"] arrives already percent-decoded per the ASGI spec, so the
+    # segment is used verbatim — a second unquote() here would double-decode a
+    # literal %XX in the id.
     ws = _WS_PATH_RE.match(path)
     if ws:
-        _flag("workspace_path_id", unquote(ws.group(1)))
+        _flag("workspace_path_id", ws.group(1))
     th = _THREAD_PATH_RE.match(path)
     if th:
-        _flag("thread_path_id", unquote(th.group(1)))
+        _flag("thread_path_id", th.group(1))
     if query_string:
         try:
             params = parse_qs(query_string.decode("latin-1"))
