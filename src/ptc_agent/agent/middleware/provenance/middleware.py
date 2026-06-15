@@ -241,14 +241,17 @@ class ProvenanceMiddleware(AgentMiddleware):
             if tool_name != "ExecuteCode" and _is_error_result(result):
                 return result
 
-            sources = list(extractor(request, result))
-
-            # mcp_trace is provenance-only scaffolding carrying raw in-sandbox
-            # args + snippets. Strip it from the artifact now (after extraction)
-            # so it never rides the public tool_call_result event or lands in
-            # persisted sse_events. Runs regardless of whether sources were found.
-            if tool_name == "ExecuteCode":
-                _strip_mcp_trace(result)
+            try:
+                sources = list(extractor(request, result))
+            finally:
+                # mcp_trace is provenance-only scaffolding carrying raw in-sandbox
+                # args + snippets. Strip it from the artifact (after extraction
+                # reads it) so it never rides the public tool_call_result event or
+                # lands in persisted sse_events. In a finally so it runs even if
+                # the extractor raises — the raw-args-never-persisted property must
+                # not depend on extraction succeeding.
+                if tool_name == "ExecuteCode":
+                    _strip_mcp_trace(result)
 
             if not sources:
                 return result

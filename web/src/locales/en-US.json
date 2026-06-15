@@ -1232,7 +1232,6 @@
       "workspaceRoot": "Workspace root",
       "viewDetails": "View details",
       "expand": "Expand",
-      "collapse": "Collapse",
       "actions": {
         "openLink": "Open link",
         "openFile": "Open file"

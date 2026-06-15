@@ -112,6 +112,13 @@ export default function RightPanel({
     else if (targetFile || targetDirectory) setTab('files');
   }, [targetSources, targetMemoryKey, targetMemoKey, targetFile, targetDirectory]);
 
+  // The 'sources' tab only exists in `tabs` while targetSources is set. If it
+  // clears while Sources is open, `tab` would point at a tab no longer in the
+  // array (no active highlight + empty body); fall back so it always resolves.
+  React.useEffect(() => {
+    if (tab === 'sources' && targetSources == null) setTab('files');
+  }, [tab, targetSources]);
+
   return (
     <div
       className="flex flex-col h-full"
