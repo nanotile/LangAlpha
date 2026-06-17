@@ -5,6 +5,7 @@ from typing import Any
 
 import structlog
 
+from ptc_agent.agent.provenance import _SNIPPET_MAX_CHARS
 from ptc_agent.config.core import MCPServerConfig
 
 from .mcp_registry import MCPToolInfo
@@ -1002,9 +1003,10 @@ def _trace_mcp_call(server: str, tool: str, args: Any, result: Any) -> None:
             "args": args if isinstance(args, dict) else {{}},
             "result_sha256": hashlib.sha256(encoded).hexdigest(),
             "result_size": len(encoded),
-            # 500 must stay == _SNIPPET_MAX_CHARS in agent/provenance/types.py
-            # (host + sandbox snippets must match byte-for-byte for dedup).
-            "result_snippet": canonical[:500],
+            # Cap interpolated from the canonical _SNIPPET_MAX_CHARS in
+            # agent/provenance/types.py at codegen time, so host + sandbox
+            # snippets match byte-for-byte for dedup with no manual hardcode.
+            "result_snippet": canonical[:{_SNIPPET_MAX_CHARS}],
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }}
         os.makedirs(os.path.dirname(trace_file), exist_ok=True)

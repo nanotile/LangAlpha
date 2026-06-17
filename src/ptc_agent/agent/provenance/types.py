@@ -15,6 +15,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+# Canonical snippet cap. Single source of truth: imported by the host-side
+# ProvenanceMiddleware and interpolated into the in-sandbox MCP client template
+# (tool_generator) so host and sandbox truncate identically — equal snippets are
+# required for cross-surface dedup.
 _SNIPPET_MAX_CHARS = 500
 
 
