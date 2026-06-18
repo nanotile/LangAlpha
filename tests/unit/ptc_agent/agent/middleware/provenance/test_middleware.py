@@ -593,7 +593,7 @@ async def test_execute_code_records_despite_error_content(middleware):
 async def test_execute_code_caps_entries_and_snippet(middleware):
     from ptc_agent.agent.middleware.provenance.middleware import (
         _MAX_TRACE_ENTRIES,
-        _SNIPPET_MAX_CHARS,
+        SNIPPET_MAX_CHARS,
     )
 
     trace = [
@@ -602,7 +602,7 @@ async def test_execute_code_caps_entries_and_snippet(middleware):
             "tool": f"tool_{i}",
             "result_sha256": "s",
             "result_size": 1,
-            "result_snippet": "x" * (_SNIPPET_MAX_CHARS + 50),
+            "result_snippet": "x" * (SNIPPET_MAX_CHARS + 50),
         }
         for i in range(_MAX_TRACE_ENTRIES + 25)
     ]
@@ -614,7 +614,7 @@ async def test_execute_code_caps_entries_and_snippet(middleware):
         emitted,
     )
     assert len(emitted) == _MAX_TRACE_ENTRIES  # entries capped
-    assert all(len(e["result_snippet"]) <= _SNIPPET_MAX_CHARS for e in emitted)
+    assert all(len(e["result_snippet"]) <= SNIPPET_MAX_CHARS for e in emitted)
 
 
 # ----- redacted args capture: secrets must never leak into emitted sources ---

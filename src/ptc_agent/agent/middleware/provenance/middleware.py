@@ -24,7 +24,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_stream_writer
 
 from ptc_agent.agent.provenance import (
-    _SNIPPET_MAX_CHARS,
+    SNIPPET_MAX_CHARS,
     ProvenanceSource,
     build_provenance_event,
     fingerprint_result,
@@ -98,7 +98,7 @@ _MARKET_DATA_TOOLS = (
 # Host-side bounds on the in-sandbox MCP trace (LLM-authored, untrusted): the
 # generated client is supposed to self-limit, but it's code the agent controls,
 # so re-clamp here so a poisoned/huge trace can't amplify into DB/SSE/render.
-# _SNIPPET_MAX_CHARS is imported from provenance.types (the canonical cap shared
+# SNIPPET_MAX_CHARS is imported from provenance.types (the canonical cap shared
 # with the in-sandbox client) so host- and sandbox-side truncation stay equal.
 _SHA_MAX_CHARS = 128
 _IDENT_PART_MAX_CHARS = 256
@@ -520,6 +520,6 @@ class ProvenanceMiddleware(AgentMiddleware):
                 result_sha256=_truncate(entry.get("result_sha256"), _SHA_MAX_CHARS),
                 result_size=entry.get("result_size"),
                 result_snippet=_truncate(
-                    entry.get("result_snippet"), _SNIPPET_MAX_CHARS
+                    entry.get("result_snippet"), SNIPPET_MAX_CHARS
                 ),
             )

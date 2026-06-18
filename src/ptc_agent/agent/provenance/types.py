@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 # ProvenanceMiddleware and interpolated into the in-sandbox MCP client template
 # (tool_generator) so host and sandbox truncate identically — equal snippets are
 # required for cross-surface dedup.
-_SNIPPET_MAX_CHARS = 500
+SNIPPET_MAX_CHARS = 500
 
 
 @dataclass
@@ -84,7 +84,7 @@ def fingerprint_result(value: object) -> tuple[str, int, str]:
     encoded = canonical.encode("utf-8")
     sha256_hex = hashlib.sha256(encoded).hexdigest()
     size = len(encoded)
-    snippet = canonical[:_SNIPPET_MAX_CHARS]
+    snippet = canonical[:SNIPPET_MAX_CHARS]
     return sha256_hex, size, snippet
 
 
