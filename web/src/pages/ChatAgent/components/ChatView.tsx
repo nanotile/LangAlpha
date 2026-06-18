@@ -1258,7 +1258,12 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
     const merged: Record<string, ProvenanceRecord> = {};
     for (const m of messages) {
       const recs = (m as { provenanceRecords?: Record<string, ProvenanceRecord> }).provenanceRecords;
-      if (recs) Object.assign(merged, recs);
+      if (!recs) continue;
+      // First occurrence wins: keep the earliest turn's metadata for a colliding
+      // key (Object.assign would let later turns overwrite — last-wins).
+      for (const key in recs) {
+        if (!(key in merged)) merged[key] = recs[key];
+      }
     }
     return merged;
   }, [filePanelTargetSources, messages]);
