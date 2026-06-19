@@ -843,10 +843,13 @@ class BackgroundTaskManager:
     async def _drain_killed_subagent_events(
         self, thread_id: str, tasks: list
     ) -> list[dict]:
-        """Synchronously read each task's already-captured events (non-blocking).
+        """Best-effort bounded snapshot of in-flight subagent events pre-teardown.
 
-        Reads the in-memory tail + Redis spill and marks each killed subagent
-        "stopped". No wait loop — never starts new work.
+        Async-reads each subagent's in-memory tail + Redis spill via
+        ``iter_subagent_events_full`` and appends a synthetic "stopped" close per
+        task. Runs BEFORE ``cancel_and_clear`` (ordering at the teardown call
+        site) so the registry is still intact; the caller bounds it with
+        ``asyncio.wait_for``. Starts no new agent work — it only reads and closes.
         """
         merged: list[dict] = []
         for task in tasks:

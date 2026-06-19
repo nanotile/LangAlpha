@@ -45,7 +45,10 @@ describe('cancelWorkflow', () => {
   it('POSTs to /threads/{id}/cancel and returns response data', async () => {
     mockPost.mockResolvedValue({ data: { success: true } });
     const result = await cancelWorkflow('t-1');
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/threads/t-1/cancel');
+    // Bounded by a 5s timeout so a network-level hang can't block the stop retries.
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/threads/t-1/cancel', undefined, {
+      timeout: 5000,
+    });
     expect(result).toEqual({ success: true });
   });
 });

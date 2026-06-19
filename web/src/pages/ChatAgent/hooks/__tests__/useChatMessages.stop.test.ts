@@ -102,7 +102,10 @@ describe('useChatMessages — stopWorkflow (hard stop)', () => {
     mockSendStream.mockImplementation(
       async (...args: unknown[]) => {
         const onEvent = args[5] as OnEvent;
-        capturedSignal = args[17] as AbortSignal;
+        // signal is the trailing positional arg of sendChatMessageStream; find
+        // it by type so inserting a new param before it can't silently break
+        // this capture (the mock isn't typed against the real signature).
+        capturedSignal = args.find((a): a is AbortSignal => a instanceof AbortSignal);
         // metadata first (latches run_id), then open a reasoning block.
         onEvent({ event: 'metadata', thread_id: 'th-stop', run_id: 'run-1' });
         onEvent({ event: 'message_chunk', role: 'assistant', agent: 'main', content_type: 'reasoning_signal', content: 'start' });

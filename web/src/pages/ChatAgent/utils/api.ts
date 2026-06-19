@@ -525,7 +525,13 @@ export async function sendChatMessageStream(
  */
 export async function cancelWorkflow(threadId: string) {
   if (!threadId) throw new Error('Thread ID is required');
-  const { data } = await api.post(`/api/v1/threads/${threadId}/cancel`);
+  // Bound the request: the shared axios instance sets no global timeout, so a
+  // network-level hang (not a 4xx) would block each stopWorkflow retry until the
+  // browser's ~60s default — delaying the "couldn't stop" toast by minutes. 5s
+  // is ample for a cancel POST.
+  const { data } = await api.post(`/api/v1/threads/${threadId}/cancel`, undefined, {
+    timeout: 5000,
+  });
   return data;
 }
 

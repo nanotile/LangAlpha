@@ -711,7 +711,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   const chatPlaceholder = useMemo(() => {
     if (pendingRejection) return t('chat.placeholderPendingRejection');
     if (wasStopped && !isLoading && !pendingInterrupt && !pendingRejection)
-      return t('chat.placeholderInterrupted');
+      return t('chat.placeholderStopped');
     if (isLoading) return t('chat.placeholderLoading');
     if (hasActiveSubagents) return t('chat.placeholderSubagentsRunning');
     return t('chat.placeholderDefault');
