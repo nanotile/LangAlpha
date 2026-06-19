@@ -516,6 +516,8 @@ class BackgroundTaskManager:
     ) -> TaskInfo:
         """Start a workflow as a background task."""
         key = (thread_id, run_id)
+        cancelled_placeholder: Optional[TaskInfo] = None
+        cancelled_uid: Optional[str] = None
         async with self.task_lock:
             if key in self.tasks:
                 existing = self.tasks[key]
@@ -529,78 +531,87 @@ class BackgroundTaskManager:
                         # would tear down on its first cancel-event check —
                         # flushing a stale checkpoint and marking the thread
                         # CANCELLED over the new turn. Settle the placeholder
-                        # terminally and release its burst slot here (no task is
-                        # created, so the BTM finalizer that normally releases it
-                        # never runs).
+                        # terminally; its burst slot is released after the lock
+                        # (no task is created, so the BTM finalizer that normally
+                        # releases it never runs).
                         existing.status = TaskStatus.CANCELLED
                         existing.completed_at = datetime.now()
                         existing.persistence_complete.set()
-                        uid = (metadata or {}).get("user_id")
-                        if uid:
-                            await release_burst_slot(uid)
+                        cancelled_placeholder = existing
+                        cancelled_uid = (metadata or {}).get("user_id")
                         logger.info(
                             f"[BackgroundTaskManager] Placeholder {key} cancelled "
                             "before start; settled without resurrecting"
                         )
-                        return existing
-                    # Upgrade pre-registered placeholder in-place.
-                    existing.metadata = metadata or {}
-                    existing.completion_callback = completion_callback
-                    existing.graph = graph
-                    existing.task = asyncio.create_task(
-                        self._run_workflow(
-                            thread_id, run_id, workflow_generator,
-                            cancel_event=existing.cancel_event,
+                    else:
+                        # Upgrade pre-registered placeholder in-place.
+                        existing.metadata = metadata or {}
+                        existing.completion_callback = completion_callback
+                        existing.graph = graph
+                        existing.task = asyncio.create_task(
+                            self._run_workflow(
+                                thread_id, run_id, workflow_generator,
+                                cancel_event=existing.cancel_event,
+                            )
                         )
+                        existing.status = TaskStatus.RUNNING
+                        existing.started_at = datetime.now()
+                        logger.info(
+                            f"[BackgroundTaskManager] Upgraded pre-registered "
+                            f"workflow thread_id={thread_id} run_id={run_id} to RUNNING"
+                        )
+                        return existing
+                else:
+                    raise RuntimeError(
+                        f"Workflow {key} already exists with status {existing.status}"
                     )
-                    existing.status = TaskStatus.RUNNING
-                    existing.started_at = datetime.now()
-                    logger.info(
-                        f"[BackgroundTaskManager] Upgraded pre-registered "
-                        f"workflow thread_id={thread_id} run_id={run_id} to RUNNING"
+            else:
+                running_count = sum(
+                    1 for t in self.tasks.values()
+                    if t.status in [TaskStatus.QUEUED, TaskStatus.RUNNING]
+                )
+                if running_count >= self.max_concurrent:
+                    raise ValueError(
+                        f"Max concurrent workflows reached ({self.max_concurrent}). "
+                        f"Currently running: {running_count}"
                     )
-                    return existing
-                raise RuntimeError(
-                    f"Workflow {key} already exists with status {existing.status}"
+
+                task_info = TaskInfo(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    status=TaskStatus.QUEUED,
+                    created_at=datetime.now(),
+                    metadata=metadata or {},
+                    completion_callback=completion_callback,
+                    graph=graph,
                 )
 
-            running_count = sum(
-                1 for t in self.tasks.values()
-                if t.status in [TaskStatus.QUEUED, TaskStatus.RUNNING]
-            )
-            if running_count >= self.max_concurrent:
-                raise ValueError(
-                    f"Max concurrent workflows reached ({self.max_concurrent}). "
-                    f"Currently running: {running_count}"
+                task_info.task = asyncio.create_task(
+                    self._run_workflow(
+                        thread_id, run_id, workflow_generator,
+                        cancel_event=task_info.cancel_event,
+                    )
+                )
+                task_info.status = TaskStatus.RUNNING
+                task_info.started_at = datetime.now()
+
+                self.tasks[key] = task_info
+
+                logger.info(
+                    f"[BackgroundTaskManager] Started workflow thread_id={thread_id} "
+                    f"run_id={run_id} (running: {running_count + 1}/{self.max_concurrent})"
                 )
 
-            task_info = TaskInfo(
-                thread_id=thread_id,
-                run_id=run_id,
-                status=TaskStatus.QUEUED,
-                created_at=datetime.now(),
-                metadata=metadata or {},
-                completion_callback=completion_callback,
-                graph=graph,
-            )
+                return task_info
 
-            task_info.task = asyncio.create_task(
-                self._run_workflow(
-                    thread_id, run_id, workflow_generator,
-                    cancel_event=task_info.cancel_event,
-                )
-            )
-            task_info.status = TaskStatus.RUNNING
-            task_info.started_at = datetime.now()
-
-            self.tasks[key] = task_info
-
-            logger.info(
-                f"[BackgroundTaskManager] Started workflow thread_id={thread_id} "
-                f"run_id={run_id} (running: {running_count + 1}/{self.max_concurrent})"
-            )
-
-            return task_info
+        # Cancelled-before-start placeholder: release its burst slot OUTSIDE the
+        # lock, mirroring every other release_burst_slot in this file. Holding
+        # task_lock across the Redis DECR would delay a concurrent /cancel, which
+        # also needs the lock. (Reached only via the fall-through above; all other
+        # branches return or raise inside the lock.)
+        if cancelled_uid:
+            await release_burst_slot(cancelled_uid)
+        return cancelled_placeholder
 
     async def _run_workflow(
         self,
