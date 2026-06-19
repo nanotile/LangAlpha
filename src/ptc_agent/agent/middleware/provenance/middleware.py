@@ -106,7 +106,9 @@ _MAX_TRACE_ENTRIES = 200
 
 # A tool result whose content begins with one of these is treated as failed, so
 # we don't record a "source accessed" for data the tool never actually returned.
-_ERROR_CONTENT_PREFIXES = ("[error]", "error:", "failed", "exception")
+# "exception:"/"exception " (not bare "exception") so legit content like
+# "Exceptional returns this quarter" isn't misread as an error.
+_ERROR_CONTENT_PREFIXES = ("[error]", "error:", "failed", "exception:", "exception ")
 
 
 def _now_iso() -> str:
