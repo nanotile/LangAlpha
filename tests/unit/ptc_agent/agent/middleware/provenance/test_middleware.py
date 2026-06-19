@@ -560,6 +560,35 @@ async def test_web_fetch_error_string_not_recorded(middleware):
 
 
 @pytest.mark.asyncio
+async def test_web_fetch_bare_failed_to_prefix_not_recorded(middleware):
+    # The real web_fetch failure string ("Failed to fetch/process ...") arrives
+    # without the [error] marker, so the "failed to " content prefix must catch it.
+    emitted = []
+    await _run(
+        middleware,
+        _make_request("WebFetch", {"url": "https://x.test/y"}),
+        _result(content="Failed to fetch content from https://x.test/y."),
+        emitted,
+    )
+    assert emitted == []
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_failed_prose_is_recorded(middleware):
+    # "failed to " is qualified so legit prose merely starting with "Failed" is
+    # not misread as an error and dropped (bare "failed" used to swallow this).
+    emitted = []
+    await _run(
+        middleware,
+        _make_request("WebFetch", {"url": "https://x.test/y"}),
+        _result(content="Failed Q4 earnings still beat lowered expectations."),
+        emitted,
+    )
+    assert len(emitted) == 1
+    assert emitted[0]["identifier"] == "https://x.test/y"
+
+
+@pytest.mark.asyncio
 async def test_execute_code_records_despite_error_content(middleware):
     # ExecuteCode is exempt: its code may error while individual in-sandbox MCP
     # calls succeeded — those guarded trace entries must still be recorded.

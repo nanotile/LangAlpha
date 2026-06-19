@@ -106,9 +106,11 @@ _MAX_TRACE_ENTRIES = 200
 
 # A tool result whose content begins with one of these is treated as failed, so
 # we don't record a "source accessed" for data the tool never actually returned.
-# "exception:"/"exception " (not bare "exception") so legit content like
-# "Exceptional returns this quarter" isn't misread as an error.
-_ERROR_CONTENT_PREFIXES = ("[error]", "error:", "failed", "exception:", "exception ")
+# Each prefix is qualified (not a bare verb) so legit content isn't misread as an
+# error: "exception:"/"exception " not "exception" ("Exceptional returns ..."),
+# and "failed to " not "failed" ("Failed Q4 earnings beat ..."). The real string
+# errors that reach here are web_fetch's "Failed to fetch/process ...".
+_ERROR_CONTENT_PREFIXES = ("[error]", "error:", "failed to ", "exception:", "exception ")
 
 
 def _now_iso() -> str:
@@ -428,10 +430,15 @@ class ProvenanceMiddleware(AgentMiddleware):
         if not identifiers:
             identifiers = [tool_name]
 
-        # Only tag a data-kind when the identifier is a real ticker; for
-        # symbol-less tools the identifier is the tool name, so a kind label
-        # would just duplicate it.
-        detail = _MARKET_DATA_KINDS.get(tool_name) if args else None
+        # Only tag a data-kind when we have real ticker(s); for symbol-less tools
+        # identifiers is just [tool_name], so a kind label would duplicate it.
+        # Guarding on identifiers (not args truthiness) stays correct even if a
+        # symbol-less tool is later added to _MARKET_DATA_KINDS.
+        detail = (
+            _MARKET_DATA_KINDS.get(tool_name)
+            if identifiers != [tool_name]
+            else None
+        )
 
         artifact = getattr(result, "artifact", None)
         fingerprint_target = (
@@ -444,7 +451,7 @@ class ProvenanceMiddleware(AgentMiddleware):
                 source_type="market_data",
                 identifier=identifier,
                 timestamp=timestamp,
-                detail=detail if identifier != tool_name else None,
+                detail=detail,
                 provider="market_data_proxy",
                 tool_call_id=tool_call_id,
                 args=redact_args(args),
