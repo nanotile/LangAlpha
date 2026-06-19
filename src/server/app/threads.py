@@ -973,12 +973,20 @@ async def get_thread_status(thread_id: str, x_user_id: CurrentUserId):
 
 
 @router.post("/{thread_id}/cancel", status_code=200)
-async def cancel_thread(thread_id: str, x_user_id: CurrentUserId):
-    """Cancel a running workflow for this thread."""
+async def cancel_thread(
+    thread_id: str,
+    x_user_id: CurrentUserId,
+    run_id: Optional[str] = Query(None),
+):
+    """Cancel a running workflow for this thread.
+
+    ``run_id`` targets a specific run so a retried stop can't cancel a newer
+    turn started after the stopped one ended (defaults to latest active run).
+    """
     await require_thread_owner(thread_id, x_user_id)
     from src.server.handlers.workflow_handler import cancel_workflow
 
-    return await cancel_workflow(thread_id)
+    return await cancel_workflow(thread_id, run_id)
 
 
 @router.post("/{thread_id}/summarize", status_code=200)

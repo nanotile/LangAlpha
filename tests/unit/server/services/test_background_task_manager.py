@@ -832,6 +832,96 @@ class TestStopTeardownOrdering:
 
 
 # ---------------------------------------------------------------------------
+# Drain closes open subagent reasoning blocks (replay zombie fix)
+# ---------------------------------------------------------------------------
+
+class TestDrainReasoningClose:
+
+    def _task(self, task_id: str, count: int) -> MagicMock:
+        task = MagicMock()
+        task.task_id = task_id
+        task.captured_event_count = count
+        return task
+
+    @pytest.mark.asyncio
+    async def test_open_reasoning_block_gets_synthetic_close(self):
+        """A subagent killed mid-reasoning (start with no complete) gets a
+        synthetic reasoning_signal 'complete' — matching its own agent+id —
+        before the stopped close, so replay isn't stuck 'thinking'."""
+        btm = _make_btm()
+        records = [
+            {"event": "message_chunk", "data": {
+                "agent": "task:abc", "id": "m1",
+                "content": "start", "content_type": "reasoning_signal"}},
+        ]
+
+        async def fake_iter(thread_id, task):
+            for r in records:
+                yield r
+
+        with patch(
+            "src.server.services.background_task_manager.iter_subagent_events_full",
+            side_effect=fake_iter,
+        ):
+            merged = await btm._drain_killed_subagent_events(
+                "t-x", [self._task("abc", 1)]
+            )
+
+        completes = [
+            e for e in merged
+            if e["data"].get("content_type") == "reasoning_signal"
+            and e["data"].get("content") == "complete"
+        ]
+        assert len(completes) == 1
+        assert completes[0]["data"]["agent"] == "task:abc"
+        assert completes[0]["data"]["id"] == "m1"
+        # The synthetic complete precedes the finish_reason 'stopped' close.
+        idx_complete = next(
+            i for i, e in enumerate(merged)
+            if e["data"].get("content") == "complete"
+        )
+        idx_stop = next(
+            i for i, e in enumerate(merged)
+            if e["data"].get("finish_reason") == "stopped"
+        )
+        assert idx_complete < idx_stop
+
+    @pytest.mark.asyncio
+    async def test_already_completed_reasoning_not_double_closed(self):
+        """A subagent whose reasoning block already closed gets no extra
+        synthetic complete appended."""
+        btm = _make_btm()
+        records = [
+            {"event": "message_chunk", "data": {
+                "agent": "task:abc", "id": "m1",
+                "content": "start", "content_type": "reasoning_signal"}},
+            {"event": "message_chunk", "data": {
+                "agent": "task:abc", "id": "m1",
+                "content": "complete", "content_type": "reasoning_signal"}},
+        ]
+
+        async def fake_iter(thread_id, task):
+            for r in records:
+                yield r
+
+        with patch(
+            "src.server.services.background_task_manager.iter_subagent_events_full",
+            side_effect=fake_iter,
+        ):
+            merged = await btm._drain_killed_subagent_events(
+                "t-x", [self._task("abc", 2)]
+            )
+
+        completes = [
+            e for e in merged
+            if e["data"].get("content_type") == "reasoning_signal"
+            and e["data"].get("content") == "complete"
+        ]
+        # Only the original complete survives — no synthetic duplicate.
+        assert len(completes) == 1
+
+
+# ---------------------------------------------------------------------------
 # wait_for_admission decisions (decision 2A)
 # ---------------------------------------------------------------------------
 

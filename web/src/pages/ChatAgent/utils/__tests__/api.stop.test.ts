@@ -46,10 +46,23 @@ describe('cancelWorkflow', () => {
     mockPost.mockResolvedValue({ data: { success: true } });
     const result = await cancelWorkflow('t-1');
     // Bounded by a 5s timeout so a network-level hang can't block the stop retries.
+    // No runId → no run_id query param (backend falls back to latest active run).
     expect(mockPost).toHaveBeenCalledWith('/api/v1/threads/t-1/cancel', undefined, {
       timeout: 5000,
+      params: undefined,
     });
     expect(result).toEqual({ success: true });
+  });
+
+  it('targets a specific run via the run_id query param when given a runId', async () => {
+    mockPost.mockResolvedValue({ data: { success: true } });
+    // Pinning the run prevents a slow/retried cancel from hard-cancelling a
+    // newer turn the user started after the stopped one tore down.
+    await cancelWorkflow('t-1', 'run-9');
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/threads/t-1/cancel', undefined, {
+      timeout: 5000,
+      params: { run_id: 'run-9' },
+    });
   });
 });
 

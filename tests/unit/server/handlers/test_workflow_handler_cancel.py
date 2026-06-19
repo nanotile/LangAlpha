@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
-def _patch_common(*, manager_cancel_returns: bool):
+def _patch_common(*, manager_cancel_returns: bool, has_active_returns: bool = False):
     """Patch the collaborators of workflow_handler.cancel_workflow.
 
     Returns a context manager and the mocked registry_store so the test can
@@ -24,6 +24,7 @@ def _patch_common(*, manager_cancel_returns: bool):
 
     manager = MagicMock()
     manager.cancel_workflow = AsyncMock(return_value=manager_cancel_returns)
+    manager.has_active_task_for_thread = AsyncMock(return_value=has_active_returns)
 
     registry_store = MagicMock()
     registry_store.cancel_and_clear = AsyncMock(return_value=0)
@@ -70,11 +71,13 @@ async def test_cancel_with_active_task_is_signal_only():
 
 @pytest.mark.asyncio
 async def test_cancel_with_no_active_task_runs_safety_net():
-    """No active task (manager.cancel_workflow → False) ⇒ the safety-net
-    cancel_and_clear runs to wipe any orphaned registry."""
+    """No active task (manager.cancel_workflow → False, none active) ⇒ the
+    safety-net cancel_and_clear runs to wipe any orphaned registry."""
     from src.server.handlers.workflow_handler import cancel_workflow
 
-    patches, registry_store, _manager = _patch_common(manager_cancel_returns=False)
+    patches, registry_store, _manager = _patch_common(
+        manager_cancel_returns=False, has_active_returns=False
+    )
     for p in patches:
         p.start()
     try:
@@ -85,3 +88,28 @@ async def test_cancel_with_no_active_task_runs_safety_net():
 
     assert result["cancelled"] is True
     registry_store.cancel_and_clear.assert_awaited_once_with("t-1", force=True)
+
+
+@pytest.mark.asyncio
+async def test_run_targeted_miss_with_other_active_task_skips_safety_net():
+    """A run-targeted cancel that misses its run (manager.cancel_workflow →
+    False) but where ANOTHER turn is still active must NOT wipe the registry —
+    that would kill the other turn's subagents."""
+    from src.server.handlers.workflow_handler import cancel_workflow
+
+    patches, registry_store, manager = _patch_common(
+        manager_cancel_returns=False, has_active_returns=True
+    )
+    for p in patches:
+        p.start()
+    try:
+        result = await cancel_workflow("t-1", "run-A")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert result["cancelled"] is True
+    # run_id threaded through to the manager so it targets the stopped run.
+    manager.cancel_workflow.assert_awaited_once_with("t-1", "run-A")
+    # Another turn owns the thread → safety net must be skipped.
+    registry_store.cancel_and_clear.assert_not_awaited()

@@ -2797,6 +2797,10 @@ export function useChatMessages(
    */
   const stopWorkflow = async () => {
     const tid = threadIdRef.current;
+    // Capture the run we're stopping NOW, before any await. If the cancel POST
+    // is slow and the user sends a new turn before the retry fires, this keeps
+    // the retry pinned to the stopped run instead of cancelling the new one.
+    const stoppedRunId = currentRunIdRef.current;
     if (wasStoppedRef.current) return; // double-click stop is idempotent
 
     // (a) Abort the main reader NOW so the stop feels instant. The aborted
@@ -2834,10 +2838,10 @@ export function useChatMessages(
     // toast so a failed cancel doesn't silently diverge UI from backend.
     if (tid && tid !== '__default__') {
       try {
-        await cancelWorkflow(tid);
+        await cancelWorkflow(tid, stoppedRunId);
       } catch {
         try {
-          await cancelWorkflow(tid);
+          await cancelWorkflow(tid, stoppedRunId);
         } catch {
           toast({ description: t('chat.stopFailed'), variant: 'destructive' });
         }

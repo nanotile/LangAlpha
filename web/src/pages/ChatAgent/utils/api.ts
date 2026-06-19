@@ -520,10 +520,17 @@ export async function sendChatMessageStream(
  * Hard-cancel the workflow for a thread (stops the main agent AND kills all
  * subagents immediately, flushing the checkpoint so the next message resumes
  * from the last committed step).
+ *
+ * Pass ``runId`` to target a specific run. Without it the backend cancels the
+ * latest active run — which, if a slow/retried cancel lands after the stopped
+ * turn already tore down and the user started a new one, would hard-cancel that
+ * *new* turn. The stop flow captures the run id at stop entry to avoid this.
+ *
  * @param {string} threadId - The thread ID to cancel
+ * @param {string|null} runId - The specific run to cancel; null = latest active
  * @returns {Promise<Object>} Response data
  */
-export async function cancelWorkflow(threadId: string) {
+export async function cancelWorkflow(threadId: string, runId: string | null = null) {
   if (!threadId) throw new Error('Thread ID is required');
   // Bound the request: the shared axios instance sets no global timeout, so a
   // network-level hang (not a 4xx) would block each stopWorkflow retry until the
@@ -531,6 +538,7 @@ export async function cancelWorkflow(threadId: string) {
   // is ample for a cancel POST.
   const { data } = await api.post(`/api/v1/threads/${threadId}/cancel`, undefined, {
     timeout: 5000,
+    params: runId ? { run_id: runId } : undefined,
   });
   return data;
 }

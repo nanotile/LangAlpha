@@ -149,9 +149,11 @@ describe('useChatMessages — stopWorkflow (hard stop)', () => {
     expect(findReasoning(after)?.isReasoning).toBe(false);
     expect((after as { stopped?: boolean }).stopped).toBe(true);
     expect(after.isStreaming).toBe(false);
-    // (c) cancel POSTed once (success → no retry, no toast).
+    // (c) cancel POSTed once (success → no retry, no toast). Second arg is the
+    // run id captured at stop entry, so a slow/retried cancel can't hit a newer
+    // turn (the send latched run-1 from its metadata event).
     expect(mockCancel).toHaveBeenCalledTimes(1);
-    expect(mockCancel).toHaveBeenCalledWith('th-stop');
+    expect(mockCancel).toHaveBeenCalledWith('th-stop', 'run-1');
     expect(toastMock).not.toHaveBeenCalled();
     // No error banner from the aborted stream.
     expect(result.current.messageError).toBeNull();
@@ -382,7 +384,8 @@ describe('useChatMessages — stopWorkflow (hard stop)', () => {
     await act(async () => {
       await result.current.stopWorkflow();
     });
-    expect(mockCancel).toHaveBeenCalledWith('th-a');
+    // Second arg is the run id captured at stop entry (null — none latched).
+    expect(mockCancel).toHaveBeenCalledWith('th-a', null);
 
     // Switch to live thread B → mount effect fires reconnectToStream.
     ws = 'ws-b';

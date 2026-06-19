@@ -6,6 +6,7 @@ Extracted from src/server/app/workflow.py to separate business logic from route 
 
 import asyncio
 import logging
+from typing import Optional
 
 from fastapi import HTTPException
 
@@ -57,7 +58,7 @@ def extract_state_values(checkpoint_tuple) -> dict:
     return channel_values
 
 
-async def cancel_workflow(thread_id: str) -> dict:
+async def cancel_workflow(thread_id: str, run_id: Optional[str] = None) -> dict:
     """
     Explicitly cancel a workflow execution (user stop).
 
@@ -70,8 +71,13 @@ async def cancel_workflow(thread_id: str) -> dict:
     crash), so the deterministic teardown sequence (flush → drain → clear →
     persist) isn't raced.
 
+    ``run_id`` targets a specific run so a slow/retried stop can't cancel a
+    *newer* turn the user started after the stopped one finished (the manager
+    otherwise falls back to "latest active run"). Omitted = latest active run.
+
     Args:
         thread_id: Thread ID to cancel
+        run_id: Specific run to cancel; None falls back to the latest active run
 
     Returns:
         Confirmation of cancellation with thread_id
@@ -98,9 +104,11 @@ async def cancel_workflow(thread_id: str) -> dict:
         )
 
         manager = BackgroundTaskManager.get_instance()
-        cancel_success = await manager.cancel_workflow(thread_id)
+        cancel_success = await manager.cancel_workflow(thread_id, run_id)
 
-        if not cancel_success:
+        if not cancel_success and not await manager.has_active_task_for_thread(
+            thread_id
+        ):
             logger.warning(
                 f"Could not cancel background task for {thread_id} "
                 "(may be already completed or not found)"
@@ -108,7 +116,8 @@ async def cancel_workflow(thread_id: str) -> dict:
             # Safety net: no active task owns the teardown, so wipe any
             # orphaned registry left behind (e.g. after a crash). When a task
             # IS active, its except-handler teardown owns cancel_and_clear and
-            # we must NOT race it here.
+            # we must NOT race it here — nor wipe a *different* still-running
+            # turn's registry when a run-targeted cancel missed its run.
             from src.server.services.background_registry_store import (
                 BackgroundRegistryStore,
             )

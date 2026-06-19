@@ -304,6 +304,17 @@ class BackgroundTaskManager:
                     return True
         return False
 
+    async def has_active_task_for_thread(self, thread_id: str) -> bool:
+        """True if any QUEUED/RUNNING task exists for the thread.
+
+        Used by the /cancel safety net so it only wipes a thread's registry
+        when nothing else owns it — a run-targeted cancel that misses (the run
+        already tore down) must NOT clear a *different*, still-running turn's
+        subagents.
+        """
+        async with self.task_lock:
+            return self._find_active_for_thread(thread_id) is not None
+
     async def start_cleanup_task(self):
         """Start periodic cleanup background task."""
         if self.cleanup_task is None or self.cleanup_task.done():
@@ -855,9 +866,37 @@ class BackgroundTaskManager:
         for task in tasks:
             if getattr(task, "captured_event_count", 0) <= 0:
                 continue
+            # Track reasoning blocks left open at the kill point so we can close
+            # them, mirroring the main agent's finalize_stopped_events. Keyed by
+            # the subagent's own (agent, message id) so the synthetic close
+            # matches the unpaired start exactly.
+            open_reasoning: dict[tuple[str, str], None] = {}
             async for record in iter_subagent_events_full(thread_id, task):
                 enriched = _record_to_persist_event(record, thread_id)
                 merged.append(enriched)
+                data = enriched.get("data") or {}
+                if data.get("content_type") == "reasoning_signal":
+                    rk = (data.get("agent", ""), data.get("id", ""))
+                    if data.get("content") == "start":
+                        open_reasoning[rk] = None
+                    elif data.get("content") == "complete":
+                        open_reasoning.pop(rk, None)
+            # Close any reasoning block still open when the subagent was killed,
+            # else replay renders the card stuck "thinking" indefinitely.
+            for r_agent, r_id in open_reasoning:
+                merged.append(
+                    {
+                        "event": "message_chunk",
+                        "data": {
+                            "thread_id": thread_id,
+                            "agent": r_agent,
+                            "id": r_id,
+                            "role": "assistant",
+                            "content": "complete",
+                            "content_type": "reasoning_signal",
+                        },
+                    }
+                )
             # Mark the killed subagent's stream "stopped" for replay.
             agent_id = f"task:{getattr(task, 'task_id', '')}"
             merged.append(
