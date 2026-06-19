@@ -2987,6 +2987,10 @@ except OSError as e:
                             retry_policy=RetryPolicy.SAFE,
                         )
                     )
+                except asyncio.CancelledError:
+                    # Propagate the cancel we're unwinding; the shielded rm above
+                    # has already been dispatched and runs to completion detached.
+                    raise
                 except Exception as e:
                     logger.debug(
                         "Failed to clean up MCP trace file on cancel",
