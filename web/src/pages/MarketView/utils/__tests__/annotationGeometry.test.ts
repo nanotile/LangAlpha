@@ -75,8 +75,8 @@ describe('buildMarkers', () => {
     // sorted by time ascending
     expect(markers[0].time).toBe(T('2024-11-14T00:00:00Z'));
     expect(markers[0].shape).toBe('arrowUp');
-    // square collapses to circle (LWC has no square marker)
-    expect(markers[1].shape).toBe('circle');
+    // square is a native LWC SeriesMarkerShape — passed through, not downgraded.
+    expect(markers[1].shape).toBe('square');
   });
 
   it('ignores non-marker annotations', () => {

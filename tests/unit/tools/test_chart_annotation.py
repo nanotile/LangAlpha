@@ -20,6 +20,7 @@ from src.tools.chart_annotation.schemas import (
     VerticalLineAnnotation,
 )
 from src.tools.chart_annotation.tools import (
+    _normalize_annotation,
     draw_chart_annotation,
     manage_chart_annotations,
 )
@@ -320,6 +321,115 @@ class TestAnnotationSchemas:
         # invalid action
         with pytest.raises(ValidationError):
             ManageChartAnnotationsArgs(symbol="NVDA", action="flush")
+
+
+class TestSchemaBounds:
+    """Numeric and length guards that keep LLM-generated payloads sane.
+
+    The annotation models set ``allow_inf_nan=False`` (NaN/Inf break JSONB
+    serialization) and cap every string field, so a runaway agent can't poison
+    storage or the chart with non-finite numbers or oversized strings.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_price_line_rejects_non_finite_price(self, bad):
+        with pytest.raises(ValidationError):
+            DrawChartAnnotationArgs(
+                symbol="NVDA",
+                annotation={"type": "price_line", "price": bad},
+            )
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_point_rejects_non_finite_price(self, bad):
+        """Non-finite floats are rejected on nested (time, price) anchors too."""
+        with pytest.raises(ValidationError):
+            DrawChartAnnotationArgs(
+                symbol="NVDA",
+                annotation={
+                    "type": "trendline",
+                    "point1": {"time": "2024-10-16T00:00:00Z", "price": bad},
+                    "point2": {"time": "2024-12-20T00:00:00Z", "price": 1.0},
+                },
+            )
+
+    def test_label_exceeding_max_length_rejected(self):
+        with pytest.raises(ValidationError):
+            DrawChartAnnotationArgs(
+                symbol="NVDA",
+                annotation={"type": "price_line", "price": 1.0, "label": "x" * 201},
+            )
+
+    def test_label_at_max_length_accepted(self):
+        """The cap is inclusive — exactly the max length is fine."""
+        args = DrawChartAnnotationArgs(
+            symbol="NVDA",
+            annotation={"type": "price_line", "price": 1.0, "label": "x" * 200},
+        )
+        assert isinstance(args.annotation, PriceLineAnnotation)
+
+    def test_color_exceeding_max_length_rejected(self):
+        with pytest.raises(ValidationError):
+            DrawChartAnnotationArgs(
+                symbol="NVDA",
+                annotation={"type": "price_line", "price": 1.0, "color": "x" * 65},
+            )
+
+    def test_time_exceeding_max_length_rejected(self):
+        with pytest.raises(ValidationError):
+            DrawChartAnnotationArgs(
+                symbol="NVDA",
+                annotation={"type": "marker", "time": "x" * 41, "shape": "circle"},
+            )
+
+    def test_event_detail_exceeding_max_length_rejected(self):
+        with pytest.raises(ValidationError):
+            DrawChartAnnotationArgs(
+                symbol="NVDA",
+                annotation={
+                    "type": "event",
+                    "time": "2024-11-14T00:00:00Z",
+                    "price": 1.0,
+                    "title": "Earnings",
+                    "detail": "x" * 601,
+                },
+            )
+
+
+class TestNormalizeAnnotation:
+    """`_normalize_annotation` — the raw-dict revalidation branch.
+
+    The ``@tool`` decorator may hand the tool a validated Pydantic instance or
+    a raw dict (nested JSON from the LLM). Both must land as the same validated
+    plain dict, and an invalid payload must return ``None`` (the tool turns that
+    into a clear error rather than persisting garbage).
+    """
+
+    def test_model_instance_branch(self):
+        out = _normalize_annotation(PriceLineAnnotation(type="price_line", price=1.0))
+        assert out is not None
+        assert out["type"] == "price_line"
+        assert out["price"] == 1.0
+
+    def test_raw_dict_branch_revalidates(self):
+        out = _normalize_annotation({"type": "price_line", "price": 205.0})
+        assert out is not None
+        assert out["type"] == "price_line"
+        assert out["price"] == 205.0
+        # default fields are materialized through the model
+        assert out["style"] == "solid"
+
+    def test_raw_dict_missing_required_field_returns_none(self):
+        assert _normalize_annotation({"type": "price_line"}) is None  # no price
+
+    def test_raw_dict_unknown_type_returns_none(self):
+        assert _normalize_annotation({"type": "bogus", "price": 1.0}) is None
+
+    def test_raw_dict_non_finite_returns_none(self):
+        assert _normalize_annotation({"type": "price_line", "price": float("nan")}) is None
+
+    def test_non_dict_non_model_returns_none(self):
+        assert _normalize_annotation("not an annotation") is None
+        assert _normalize_annotation(None) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -645,6 +755,25 @@ class TestDrawChartAnnotation:
         assert result.artifact == {}
         writer.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_invalid_raw_dict_returns_error_no_write(self, fake_db):
+        """A raw dict that bypasses args_schema and fails revalidation in the
+        tool body returns the invalid-payload error and persists nothing."""
+        writer = MagicMock()
+        with patch("langgraph.config.get_stream_writer", return_value=writer):
+            # `.coroutine` skips the args_schema, so the raw (invalid) dict
+            # reaches the tool body and exercises the `payload is None` branch.
+            content, artifact = await draw_chart_annotation.coroutine(
+                symbol="NVDA",
+                annotation={"type": "price_line"},  # missing required price
+                config=_config(),
+            )
+
+        assert "invalid annotation" in content.lower()
+        assert artifact == {}
+        writer.assert_not_called()
+        assert fake_db.instances == {}
+
 
 # --------------------------------------------------------------------------- #
 # manage_chart_annotations tool
@@ -823,6 +952,19 @@ class TestManageChartAnnotations:
         )
         assert "does not accept" in result.content.lower()
         assert result.artifact == {}
+
+    @pytest.mark.asyncio
+    async def test_unknown_action_defensive_branch(self, fake_db):
+        """The args_schema constrains action to a Literal, but the tool body
+        still fails safe if an unknown action ever reaches it."""
+        # `.coroutine` skips the args_schema so the bogus action hits the body.
+        content, artifact = await manage_chart_annotations.coroutine(
+            symbol="NVDA",
+            action="flush",
+            config=_config(),
+        )
+        assert "unknown action" in content.lower()
+        assert artifact == {}
 
 
 # --------------------------------------------------------------------------- #

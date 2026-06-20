@@ -1,40 +1,33 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// --- Mock lightweight-charts (canvas can't render in jsdom) ---------------
-const fakeSeries = {
-  setData: vi.fn(),
-  createPriceLine: vi.fn(),
-  setMarkers: vi.fn(),
-  attachPrimitive: vi.fn(),
-};
-const fakeLineSeries = { setData: vi.fn() };
-const fakeChart = {
-  addCandlestickSeries: vi.fn(() => fakeSeries),
-  addLineSeries: vi.fn(() => fakeLineSeries),
-  timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
-  remove: vi.fn(),
-};
-vi.mock('lightweight-charts', () => ({
-  createChart: vi.fn(() => fakeChart),
-  ColorType: { Solid: 'solid' },
-  CrosshairMode: { Normal: 1, Magnet: 0, Hidden: 2 },
-  LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
+// Stub the heavy chart surface — it owns websockets, React Query and the real
+// lightweight-charts canvas, all tested in MarketView. Here we only care that
+// the card mounts it with the right props once the modal opens.
+vi.mock('@/pages/MarketView/components/MarketChartSurface', () => ({
+  MarketChartSurface: (props: { symbol: string; timeframe?: string; workspaceId?: string | null }) => (
+    <div data-testid="surface">{`${props.symbol}:${props.timeframe}:${props.workspaceId ?? ''}`}</div>
+  ),
 }));
 
-// --- Mock the market-data fetch -------------------------------------------
-import { fetchStockData } from '@/pages/MarketView/utils/api';
-vi.mock('@/pages/MarketView/utils/api', () => ({
-  fetchStockData: vi.fn(),
+// Stub the OHLC fetch hook so the resting card's preview chart has bars without
+// hitting React Query / the network. Two ascending bars → an "up" green trend.
+vi.mock('@/pages/MarketView/hooks/useStockBars', () => ({
+  useStockBars: () => ({
+    bars: [
+      { time: 1_700_000_000, open: 100, high: 102, low: 99, close: 101 },
+      { time: 1_700_086_400, open: 101, high: 110, low: 100, close: 108 },
+    ],
+    isLoading: false,
+    isError: false,
+  }),
 }));
 
 import { WorkspaceProvider } from '../../../contexts/WorkspaceContext';
-import { ChartSurfaceContext } from '../../../contexts/ChartSurfaceContext';
+import { ChartSurfaceContext, type ChartSurface } from '../../../contexts/ChartSurfaceContext';
 import { chartAnnotationStore } from '@/pages/MarketView/stores/chartAnnotationStore';
 import { InlineChartAnnotationCard } from '../InlineChartAnnotationCard';
-
-const mockedFetch = vi.mocked(fetchStockData);
 
 const ARTIFACT = {
   type: 'chart_annotation',
@@ -61,12 +54,13 @@ function LocationDisplay(): React.ReactElement {
 
 function renderCard(
   artifact: Record<string, unknown>,
-  { chartPresent = false }: { chartPresent?: boolean } = {},
+  surface: Partial<ChartSurface> = {},
 ) {
+  const value: ChartSurface = { chartPresent: false, ...surface };
   return render(
     <MemoryRouter initialEntries={['/chat/t/thread-123']}>
       <WorkspaceProvider workspaceId="ws-ctx" downloadFile={null}>
-        <ChartSurfaceContext.Provider value={{ chartPresent }}>
+        <ChartSurfaceContext.Provider value={value}>
           <Routes>
             <Route
               path="/chat/t/:threadId"
@@ -81,36 +75,48 @@ function renderCard(
 }
 
 describe('InlineChartAnnotationCard', () => {
-  beforeEach(() => {
-    mockedFetch.mockResolvedValue({
-      data: [
-        { time: Math.floor(Date.parse('2024-10-16T00:00:00Z') / 1000), open: 100, high: 105, low: 99, close: 104, volume: 1 },
-        { time: Math.floor(Date.parse('2024-11-20T00:00:00Z') / 1000), open: 140, high: 152, low: 139, close: 150, volume: 1 },
-      ],
-    } as never);
-  });
-
   afterEach(() => {
     vi.clearAllMocks();
     chartAnnotationStore._resetForTesting();
   });
 
-  it('renders a mini-chart card and applies annotations after fetch', async () => {
+  it('renders the spotlight preview card, with the heavy surface deferred until opened', () => {
     renderCard(ARTIFACT);
 
     expect(screen.getByText('NVDA')).toBeInTheDocument();
-    expect(screen.getByText('2 annotations')).toBeInTheDocument();
-    expect(screen.getByText('Open in MarketView')).toBeInTheDocument();
-
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('NVDA', '1day', expect.any(String), expect.any(String), expect.any(Object)));
-    // native price line + primitive applied
-    await waitFor(() => expect(fakeSeries.createPriceLine).toHaveBeenCalled());
-    expect(fakeSeries.attachPrimitive).toHaveBeenCalled();
+    // The annotation count rides the card's accessible name; the floating legend
+    // names the real annotations (labelled price line + the rectangle's "Zone").
+    expect(screen.getByRole('button', { name: /2 annotations/ })).toBeInTheDocument();
+    expect(screen.getByText('Resistance')).toBeInTheDocument();
+    expect(screen.getByText('Open annotated chart')).toBeInTheDocument();
+    // The resting preview is a lightweight inline SVG of the price + overlays;
+    // the full lightweight-charts surface only mounts after the modal opens.
+    expect(screen.queryByTestId('surface')).not.toBeInTheDocument();
   });
 
-  it('expands into MarketView carrying symbol, ptc mode, workspace, thread, returnTo', async () => {
+  it('opens the modal with the chart surface, scoped to symbol/timeframe/workspace', async () => {
     renderCard(ARTIFACT);
-    fireEvent.click(screen.getByText('NVDA'));
+    fireEvent.click(screen.getByRole('button'));
+
+    // Surface is lazy-loaded, so it resolves a tick after the modal opens.
+    expect(await screen.findByTestId('surface')).toHaveTextContent('NVDA:1day:ws-art');
+  });
+
+  // The spotlight card is a role="button" — it must be keyboard-operable, not
+  // just mouse-clickable. Enter and Space both open the modal.
+  it.each(['Enter', ' '])('opens the modal via the %s key (keyboard a11y)', async (key) => {
+    renderCard(ARTIFACT);
+    const card = screen.getByRole('button');
+    expect(card).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(card, { key });
+    expect(await screen.findByTestId('surface')).toHaveTextContent('NVDA:1day:ws-art');
+  });
+
+  it('opens MarketView from the modal carrying symbol, ptc mode, workspace, thread, returnTo', async () => {
+    renderCard(ARTIFACT);
+    fireEvent.click(screen.getByRole('button')); // stage 1 -> modal
+    fireEvent.click(await screen.findByText('Open in MarketView'));
 
     const loc = await screen.findByTestId('loc');
     const url = loc.textContent || '';
@@ -123,42 +129,34 @@ describe('InlineChartAnnotationCard', () => {
     expect(params.get('returnTo')).toBe('/chat/t/thread-123');
   });
 
-  it('uses the artifact timeframe for the header, fetch, and expand URL', async () => {
+  it('uses the artifact timeframe for the bubble, the surface, and the MarketView URL', async () => {
     const hourly = { ...ARTIFACT, timeframe: '1hour' };
     renderCard(hourly);
 
-    // Header shows the timeframe.
-    expect(screen.getByText('1hour')).toBeInTheDocument();
-    // Fetch uses the timeframe, not the daily default.
-    await waitFor(() =>
-      expect(mockedFetch).toHaveBeenCalledWith(
-        'NVDA',
-        '1hour',
-        expect.any(String),
-        expect.any(String),
-        expect.any(Object),
-      ),
-    );
+    // The pill shows the short label; the full timeframe rides the accessible name.
+    expect(screen.getByText('1H')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /1hour/ })).toBeInTheDocument();
 
-    // Expanding carries the timeframe so MarketView lands on the right view.
-    fireEvent.click(screen.getByText('NVDA'));
+    fireEvent.click(screen.getByRole('button')); // open modal
+    expect(await screen.findByTestId('surface')).toHaveTextContent('NVDA:1hour:ws-art');
+
+    // Opening MarketView carries the timeframe so it lands on the right view.
+    fireEvent.click(await screen.findByText('Open in MarketView'));
     const loc = await screen.findByTestId('loc');
     const url = loc.textContent || '';
     const params = new URLSearchParams(url.slice(url.indexOf('?')));
     expect(params.get('tf')).toBe('1hour');
   });
 
-  it('collapses to a chip (no chart, no navigation) when a chart is present', async () => {
-    const { createChart } = await import('lightweight-charts');
+  it('collapses to a chip (no chart, no modal) when a chart is present', () => {
     renderCard(ARTIFACT, { chartPresent: true });
 
     expect(screen.getByText(/on chart/i)).toBeInTheDocument();
     expect(screen.queryByText('Open in MarketView')).not.toBeInTheDocument();
-    expect(vi.mocked(createChart)).not.toHaveBeenCalled();
-    expect(mockedFetch).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('surface')).not.toBeInTheDocument();
   });
 
-  it('chip restores a cleared drawing to the chart when clicked', async () => {
+  it('chip restores a cleared drawing to the chart when clicked', () => {
     // The drawing was cleared from the chart elsewhere (the Clear button).
     chartAnnotationStore.clearDisplay('ws-art', 'NVDA:1day');
     renderCard(ARTIFACT, { chartPresent: true });
@@ -171,10 +169,36 @@ describe('InlineChartAnnotationCard', () => {
     expect(chartAnnotationStore.isDisplayCleared('ws-art', 'NVDA:1day')).toBe(false);
   });
 
-  it('falls back to a text summary when the data fetch fails', async () => {
-    mockedFetch.mockResolvedValue({ data: [], error: 'No data available' } as never);
-    renderCard(ARTIFACT);
+  it('chip jumps the chart to a different ticker than the one on screen', () => {
+    const onJumpToChart = vi.fn();
+    // Drawing is on NVDA but the live chart shows AAPL → the chip offers a jump.
+    chartAnnotationStore.clearDisplay('ws-art', 'NVDA:1day');
+    renderCard(ARTIFACT, {
+      chartPresent: true,
+      activeSymbol: 'AAPL',
+      activeTimeframe: '1day',
+      onJumpToChart,
+    });
 
-    expect(await screen.findByText(/Chart preview unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/view .* on chart/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button'));
+    expect(onJumpToChart).toHaveBeenCalledWith('NVDA', '1day');
+    // Jumping also un-clears the instance so it shows once the chart switches.
+    expect(chartAnnotationStore.isDisplayCleared('ws-art', 'NVDA:1day')).toBe(false);
+  });
+
+  it('chip confirms (no jump) when it already describes the on-screen instance', () => {
+    const onJumpToChart = vi.fn();
+    renderCard(ARTIFACT, {
+      chartPresent: true,
+      activeSymbol: 'NVDA',
+      activeTimeframe: '1day',
+      onJumpToChart,
+    });
+
+    expect(screen.getByText(/on chart/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button'));
+    expect(onJumpToChart).not.toHaveBeenCalled();
   });
 });

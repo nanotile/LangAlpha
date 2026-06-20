@@ -85,6 +85,16 @@ describe('AgentEventOverlay', () => {
     expect(screen.queryByText(/Beat EPS by/)).not.toBeInTheDocument();
   });
 
+  it('exposes the .agent-event-badge hook the coarse-pointer hit-area CSS targets', async () => {
+    // The >=44px touch target is implemented as a `@media (pointer: coarse)`
+    // `::before` overlay on `.agent-event-badge` (jsdom can't evaluate media
+    // queries or pseudo-elements, so we pin the class hook the CSS relies on).
+    renderOverlay();
+    await flushFrame();
+    const badge = screen.getByText('Q3 earnings beat').closest('button');
+    expect(badge).toHaveClass('agent-event-badge');
+  });
+
   it('reveals the detail on click (tap path)', async () => {
     renderOverlay();
     await flushFrame();
@@ -108,10 +118,10 @@ describe('AgentEventOverlay', () => {
     expect(screen.getByText('Q3 earnings beat')).toBeInTheDocument();
     timeScale.timeToCoordinate.mockReturnValue(null as unknown as number);
     // Force a reposition by invoking the visible-range subscription callback.
+    // Repositioning is coalesced into a single rAF, so flush a frame after.
     const cb = timeScale.subscribeVisibleLogicalRangeChange.mock.calls[0]?.[0];
-    await act(async () => {
-      cb?.();
-    });
+    cb?.();
+    await flushFrame();
     expect(screen.queryByText('Q3 earnings beat')).not.toBeInTheDocument();
   });
 

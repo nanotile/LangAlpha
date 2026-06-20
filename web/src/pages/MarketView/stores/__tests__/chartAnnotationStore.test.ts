@@ -7,11 +7,13 @@ import {
   DEFAULT_TIMEFRAME,
   makeChartId,
   normalizeTimeframe,
+  subscribeLiveAnnotationAdd,
   useAnnotationsForView,
   useDisplayCleared,
   VALID_TIMEFRAMES,
   type ChartInstance,
   type FibRetracementAnnotation,
+  type LiveAnnotationAdd,
   type PriceLineAnnotation,
   type RectangleAnnotation,
   type StoredAnnotation,
@@ -215,6 +217,55 @@ describe('chartAnnotationStore', () => {
     expect(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]).toBeUndefined();
   });
 
+  it('setChartsForSymbol(sinceSeq) does not resurrect an instance cleared mid-fetch', () => {
+    // A sync starts and captures the seq it will pass.
+    chartAnnotationStore.add(WS, 'NVDA:1day', makePriceLine('ann_d', 'NVDA', 200));
+    const seqAtStart = chartAnnotationStore.getMutationSeq();
+
+    // A live clear lands while the (now stale) list request is in flight.
+    chartAnnotationStore.clear(WS, 'NVDA:1day');
+    expect(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]).toBeUndefined();
+
+    // The stale response still carries the instance — but it must NOT come back.
+    chartAnnotationStore.setChartsForSymbol(
+      WS,
+      'NVDA',
+      [
+        {
+          chart_id: 'NVDA:1day',
+          symbol: 'NVDA',
+          timeframe: '1day',
+          annotations: [makePriceLine('ann_d', 'NVDA', 200)],
+        },
+      ],
+      seqAtStart,
+    );
+    expect(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]).toBeUndefined();
+  });
+
+  it('setChartsForSymbol(sinceSeq) keeps an instance added mid-fetch over a stale snapshot', () => {
+    const seqAtStart = chartAnnotationStore.getMutationSeq();
+    // Live add during the in-flight list (a timeframe the server hasn't returned).
+    chartAnnotationStore.add(WS, 'NVDA:1hour', makePriceLine('ann_live', 'NVDA', 210, '1hour'));
+
+    chartAnnotationStore.setChartsForSymbol(
+      WS,
+      'NVDA',
+      [
+        {
+          chart_id: 'NVDA:1day',
+          symbol: 'NVDA',
+          timeframe: '1day',
+          annotations: [makePriceLine('ann_d', 'NVDA', 200)],
+        },
+      ],
+      seqAtStart,
+    );
+    // Server's 1day installed AND the live 1hour preserved (not dropped).
+    expect(Object.keys(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]!)).toEqual(['ann_d']);
+    expect(Object.keys(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1hour')]!)).toEqual(['ann_live']);
+  });
+
   it('clearDisplay() / restoreDisplay() flag display only, leaving data intact', () => {
     chartAnnotationStore.add(WS, 'NVDA:1day', makePriceLine('ann_1', 'NVDA', 200));
     expect(chartAnnotationStore.isDisplayCleared(WS, 'NVDA:1day')).toBe(false);
@@ -235,6 +286,19 @@ describe('chartAnnotationStore', () => {
     expect(chartAnnotationStore.isDisplayCleared(WS, 'NVDA:1day')).toBe(true);
     expect(chartAnnotationStore.isDisplayCleared(WS, 'NVDA:1hour')).toBe(false);
     expect(chartAnnotationStore.isDisplayCleared(WS2, 'NVDA:1day')).toBe(false);
+  });
+
+  it('clearDisplay() caps the cleared set, evicting the oldest entry', () => {
+    // Clear far more distinct instances than the cap (200) so a long session
+    // can't grow the set without bound.
+    for (let i = 0; i < 250; i += 1) {
+      chartAnnotationStore.clearDisplay(WS, `SYM${i}:1day`);
+    }
+    // The 50 oldest were evicted (re-show, data untouched); the newest remain.
+    expect(chartAnnotationStore.isDisplayCleared(WS, 'SYM0:1day')).toBe(false);
+    expect(chartAnnotationStore.isDisplayCleared(WS, 'SYM49:1day')).toBe(false);
+    expect(chartAnnotationStore.isDisplayCleared(WS, 'SYM50:1day')).toBe(true);
+    expect(chartAnnotationStore.isDisplayCleared(WS, 'SYM249:1day')).toBe(true);
   });
 });
 
@@ -354,6 +418,134 @@ describe('applyAnnotationArtifact', () => {
       chart_id: 'NVDA:1day',
     });
     expect(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]).toBeUndefined();
+  });
+
+  it('rejects a marker with no valid shape (would blank the shared marker layer)', () => {
+    // A marker with no shape makes lightweight-charts' setMarkers throw, which
+    // would wipe earnings + grade markers too — reject it at the store boundary.
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'add',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+      annotation: {
+        annotation_id: 'm_bad',
+        symbol: 'NVDA',
+        type: 'marker',
+        time: '2024-11-14T00:00:00Z',
+      },
+    });
+    expect(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]).toBeUndefined();
+
+    // A marker with a valid shape is accepted.
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'add',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+      annotation: {
+        annotation_id: 'm_ok',
+        symbol: 'NVDA',
+        type: 'marker',
+        time: '2024-11-14T00:00:00Z',
+        shape: 'circle',
+      },
+    });
+    expect(
+      Object.keys(chartAnnotationStore.getState().byChart[storeKey(WS, 'NVDA:1day')]!),
+    ).toEqual(['m_ok']);
+  });
+});
+
+describe('subscribeLiveAnnotationAdd', () => {
+  afterEach(() => {
+    chartAnnotationStore._resetForTesting();
+  });
+
+  it('fires on a fresh add op with the resolved instance identity', () => {
+    const seen: LiveAnnotationAdd[] = [];
+    const unsub = subscribeLiveAnnotationAdd((a) => seen.push(a));
+
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'add',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+      annotation: { annotation_id: 'ann_1', symbol: 'NVDA', type: 'price_line', price: 205 },
+    });
+
+    expect(seen).toEqual([
+      { workspaceId: WS, chartId: 'NVDA:1day', symbol: 'NVDA', timeframe: '1day' },
+    ]);
+    unsub();
+  });
+
+  it('derives symbol + timeframe from a chart_id assembled from symbol+timeframe', () => {
+    const seen: LiveAnnotationAdd[] = [];
+    subscribeLiveAnnotationAdd((a) => seen.push(a));
+
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'add',
+      workspace_id: WS,
+      symbol: 'AAPL',
+      timeframe: '1hour',
+      annotation: { annotation_id: 'ann_1', symbol: 'AAPL', type: 'price_line', price: 1 },
+    });
+
+    expect(seen).toEqual([
+      { workspaceId: WS, chartId: 'AAPL:1hour', symbol: 'AAPL', timeframe: '1hour' },
+    ]);
+  });
+
+  it('does not fire on remove / clear ops or rejected annotations', () => {
+    chartAnnotationStore.add(WS, 'NVDA:1day', makePriceLine('ann_1', 'NVDA', 200));
+    const seen: LiveAnnotationAdd[] = [];
+    subscribeLiveAnnotationAdd((a) => seen.push(a));
+
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'remove',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+      ids: ['ann_1'],
+    });
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'clear',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+    });
+    // Malformed annotation is rejected before any emit.
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'add',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+      annotation: { annotation_id: 'ann_x', symbol: 'NVDA', type: 'bogus' },
+    });
+
+    expect(seen).toEqual([]);
+  });
+
+  it('does not fire on bare store writes (only live SSE adds)', () => {
+    const seen: LiveAnnotationAdd[] = [];
+    subscribeLiveAnnotationAdd((a) => seen.push(a));
+
+    chartAnnotationStore.add(WS, 'NVDA:1day', makePriceLine('ann_1', 'NVDA', 200));
+    chartAnnotationStore.setChartsForSymbol(WS, 'NVDA', [
+      { chart_id: 'NVDA:1day', symbol: 'NVDA', timeframe: '1day', annotations: [] },
+    ]);
+
+    expect(seen).toEqual([]);
+  });
+
+  it('stops delivering after unsubscribe', () => {
+    const seen: LiveAnnotationAdd[] = [];
+    const unsub = subscribeLiveAnnotationAdd((a) => seen.push(a));
+    unsub();
+
+    applyAnnotationArtifact('chart_annotation', {
+      op: 'add',
+      workspace_id: WS,
+      chart_id: 'NVDA:1day',
+      annotation: { annotation_id: 'ann_1', symbol: 'NVDA', type: 'price_line', price: 1 },
+    });
+
+    expect(seen).toEqual([]);
   });
 });
 
