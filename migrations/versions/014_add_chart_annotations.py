@@ -10,15 +10,15 @@ renders the active workspace's chart.
 Replaces the previous Redis-backed store (7-day TTL): annotations are a durable
 workspace artifact set now, cascading away only when the workspace is deleted.
 
-Revision ID: 013
-Revises: 012
+Revision ID: 014
+Revises: 013
 """
 
 from alembic import op
 
 
-revision = "013"
-down_revision = "012"
+revision = "014"
+down_revision = "013"
 branch_labels = None
 depends_on = None
 
