@@ -7,7 +7,7 @@ mostly-None fields.
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # Bounds keep LLM-generated strings small enough that a runaway agent can't
@@ -26,7 +26,15 @@ Timeframe = Literal[
 ]
 
 
-class TimePricePoint(BaseModel):
+class _AnnotationBase(BaseModel):
+    """Base for annotation models. Rejects NaN/Infinity floats — Pydantic
+    allows them by default but they break JSONB serialization and fail the draw.
+    """
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
+class TimePricePoint(_AnnotationBase):
     """A single (time, price) anchor on the chart."""
 
     time: str = Field(
@@ -36,7 +44,7 @@ class TimePricePoint(BaseModel):
     price: float = Field(description="Price (y-axis value) at the given time")
 
 
-class PriceLineAnnotation(BaseModel):
+class PriceLineAnnotation(_AnnotationBase):
     """Horizontal price level — support/resistance/target."""
 
     type: Literal["price_line"]
@@ -54,7 +62,7 @@ class PriceLineAnnotation(BaseModel):
     style: Literal["solid", "dashed", "dotted"] = "solid"
 
 
-class TrendlineAnnotation(BaseModel):
+class TrendlineAnnotation(_AnnotationBase):
     """Trendline connecting two (time, price) anchors."""
 
     type: Literal["trendline"]
@@ -72,7 +80,7 @@ class TrendlineAnnotation(BaseModel):
     )
 
 
-class MarkerAnnotation(BaseModel):
+class MarkerAnnotation(_AnnotationBase):
     """Event callout at a specific bar."""
 
     type: Literal["marker"]
@@ -94,7 +102,7 @@ class MarkerAnnotation(BaseModel):
     )
 
 
-class VerticalLineAnnotation(BaseModel):
+class VerticalLineAnnotation(_AnnotationBase):
     """Vertical line marking a moment in time across the whole chart."""
 
     type: Literal["vertical_line"]
@@ -115,7 +123,7 @@ class VerticalLineAnnotation(BaseModel):
     style: Literal["solid", "dashed", "dotted"] = "dashed"
 
 
-class RectangleAnnotation(BaseModel):
+class RectangleAnnotation(_AnnotationBase):
     """Rectangular zone spanning a time range and a price range.
 
     Use for supply/demand zones, consolidation ranges, or any box that
@@ -138,7 +146,7 @@ class RectangleAnnotation(BaseModel):
     )
 
 
-class TextAnnotation(BaseModel):
+class TextAnnotation(_AnnotationBase):
     """Free-floating text label anchored at a (time, price) point."""
 
     type: Literal["text"]
@@ -158,7 +166,7 @@ class TextAnnotation(BaseModel):
     )
 
 
-class EventAnnotation(BaseModel):
+class EventAnnotation(_AnnotationBase):
     """News/event callout anchored at a (time, price) point.
 
     Renders an always-visible title badge on the chart; the longer ``detail``
@@ -196,7 +204,7 @@ class EventAnnotation(BaseModel):
     )
 
 
-class FibRetracementAnnotation(BaseModel):
+class FibRetracementAnnotation(_AnnotationBase):
     """Fibonacci retracement between a swing high and a swing low.
 
     Standard levels (0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0) are drawn as
@@ -239,7 +247,8 @@ class DrawChartAnnotationArgs(BaseModel):
     """Arguments for ``draw_chart_annotation``."""
 
     symbol: str = Field(
-        description="Ticker symbol of the chart (e.g. 'NVDA')."
+        max_length=32,
+        description="Ticker symbol of the chart (e.g. 'NVDA').",
     )
     timeframe: Timeframe = Field(
         default="1day",
@@ -263,7 +272,9 @@ class DrawChartAnnotationArgs(BaseModel):
 class ManageChartAnnotationsArgs(BaseModel):
     """Arguments for ``manage_chart_annotations``."""
 
-    symbol: str = Field(description="Ticker symbol (scopes the operation)")
+    symbol: str = Field(
+        max_length=32, description="Ticker symbol (scopes the operation)"
+    )
     timeframe: Timeframe = Field(
         default="1day",
         description=(

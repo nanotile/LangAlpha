@@ -19,6 +19,12 @@ from src.server.database.conversation import get_db_connection
 
 logger = logging.getLogger(__name__)
 
+# Safety valve for the read paths — far above any legitimate annotation count
+# for one chart / one symbol. Caps an unbounded result set (and the resulting
+# response size) if a runaway agent ever drew an absurd number; truncation is
+# logged so it is never silent.
+_MAX_ANNOTATION_ROWS = 2000
+
 
 def make_chart_id(symbol: str, timeframe: str) -> str:
     """Disclosed instance key: ``{SYMBOL}:{timeframe}`` (uppercased ticker)."""
@@ -68,10 +74,19 @@ async def list_annotations(workspace_id: str, chart_id: str) -> list[dict[str, A
                 FROM chart_annotations
                 WHERE workspace_id = %s AND chart_id = %s
                 ORDER BY created_at
+                LIMIT %s
                 """,
-                (workspace_id, chart_id),
+                (workspace_id, chart_id, _MAX_ANNOTATION_ROWS),
             )
             rows = await cur.fetchall()
+    if len(rows) >= _MAX_ANNOTATION_ROWS:
+        logger.warning(
+            "[chart_annotation] list_annotations hit the %d-row cap "
+            "(workspace=%s chart=%s); some annotations were not returned",
+            _MAX_ANNOTATION_ROWS,
+            workspace_id,
+            chart_id,
+        )
     return [row["payload"] for row in rows]
 
 
@@ -103,10 +118,20 @@ async def list_charts(
                 FROM chart_annotations
                 WHERE {where}
                 ORDER BY chart_id, created_at
+                LIMIT %s
                 """,
-                params,
+                [*params, _MAX_ANNOTATION_ROWS],
             )
             rows = await cur.fetchall()
+
+    if len(rows) >= _MAX_ANNOTATION_ROWS:
+        logger.warning(
+            "[chart_annotation] list_charts hit the %d-row cap "
+            "(workspace=%s symbol=%s); some annotations were not returned",
+            _MAX_ANNOTATION_ROWS,
+            workspace_id,
+            symbol,
+        )
 
     charts: dict[str, dict[str, Any]] = {}
     for row in rows:

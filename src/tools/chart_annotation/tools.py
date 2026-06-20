@@ -12,6 +12,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from pydantic import TypeAdapter, ValidationError
 
 from src.server.database.chart_annotation import (
     add_annotation,
@@ -21,11 +22,15 @@ from src.server.database.chart_annotation import (
     remove_annotations,
 )
 from src.tools.chart_annotation.schemas import (
+    Annotation,
     DrawChartAnnotationArgs,
     ManageChartAnnotationsArgs,
 )
 
 logger = logging.getLogger(__name__)
+
+# Validates raw-dict annotation payloads against the discriminated union.
+_ANNOTATION_ADAPTER: TypeAdapter = TypeAdapter(Annotation)
 
 
 # --------------------------------------------------------------------------- #
@@ -48,16 +53,21 @@ def _make_annotation_id() -> str:
 
 
 def _normalize_annotation(annotation: Any) -> dict[str, Any] | None:
-    """Turn the incoming annotation arg into a plain dict.
+    """Turn the incoming annotation arg into a validated plain dict.
 
     The ``@tool`` decorator may hand us a Pydantic instance (if args_schema
     validated ahead of call) or a raw dict (if the LLM passed nested JSON).
-    We accept either.
+    Raw dicts are re-validated through the annotation union so this path
+    enforces the same shape + length caps as the args_schema path; an invalid
+    payload returns ``None``.
     """
     if hasattr(annotation, "model_dump"):
         return annotation.model_dump()
     if isinstance(annotation, dict):
-        return dict(annotation)
+        try:
+            return _ANNOTATION_ADAPTER.validate_python(annotation).model_dump()
+        except ValidationError:
+            return None
     return None
 
 
@@ -192,8 +202,8 @@ async def draw_chart_annotation(
     payload = _normalize_annotation(annotation)
     if payload is None:
         return (
-            f"Error: unexpected annotation type {type(annotation).__name__}; "
-            "expected dict or Pydantic model.",
+            "Error: invalid annotation payload — it did not match any known "
+            "annotation type. Pass a valid annotation object (see the tool schema).",
             {},
         )
 

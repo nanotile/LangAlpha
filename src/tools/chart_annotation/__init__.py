@@ -1,7 +1,8 @@
 """Chart annotation tools — skill-gated tools for drawing on MarketView charts.
 
 Tools:
-- draw_chart_annotation: draw a price line, trendline, or marker on the chart
+- draw_chart_annotation: draw an annotation (price line, trendline, marker,
+  vertical line, rectangle, text, event, or fib retracement) on the chart
 - manage_chart_annotations: list, remove, or clear annotations for a symbol
 """
 
