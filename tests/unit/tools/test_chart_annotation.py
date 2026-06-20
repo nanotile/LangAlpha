@@ -1013,3 +1013,56 @@ class TestSkillRegistryVisibility:
             skill = get_skill("chart-annotation", mode=mode)
             assert skill is not None, f"get_skill returned None for mode={mode}"
             assert skill.name == "chart-annotation"
+
+
+# --------------------------------------------------------------------------- #
+# Storage-envelope parity (complements test_chart_annotation_schema_parity.py)
+# --------------------------------------------------------------------------- #
+
+
+class TestStorageEnvelopeParity:
+    """Pin the storage envelope the tool wraps every annotation in.
+
+    The schema-parity test pins the 8 pydantic *variant* shapes, but the
+    persisted / SSE / inline-card payload is the variant PLUS an envelope —
+    ``annotation_id``, ``symbol``, ``timeframe``, ``chart_id`` (tools.py
+    ``stored``). The frontend ``BaseAnnotation`` (chartAnnotationStore.ts)
+    hand-mirrors that envelope and the store guard hard-requires
+    ``annotation_id`` + ``symbol`` as strings. A rename/drop of an envelope
+    field passes every schema test but silently breaks the live ``add`` path,
+    so pin the wire shape the tool actually emits.
+
+    WHEN THIS FAILS: you changed the envelope in tools.py / the DB layer.
+    Update EXPECTED_STORAGE_ENVELOPE here AND the frontend BaseAnnotation in
+    chartAnnotationStore.ts in lockstep.
+    """
+
+    # Mirrors the frontend BaseAnnotation envelope fields.
+    EXPECTED_STORAGE_ENVELOPE = {"annotation_id", "symbol", "timeframe", "chart_id"}
+
+    @pytest.mark.asyncio
+    async def test_persisted_payload_carries_the_full_envelope(self, fake_db):
+        with patch("langgraph.config.get_stream_writer", return_value=MagicMock()):
+            result = await draw_chart_annotation.ainvoke(
+                _tool_call(
+                    "draw_chart_annotation",
+                    {
+                        "symbol": "NVDA",
+                        "annotation": {"type": "price_line", "price": 205.0},
+                    },
+                ),
+                config=_config(),
+            )
+
+        stored = _drawn(result)
+        missing = self.EXPECTED_STORAGE_ENVELOPE - set(stored)
+        assert not missing, (
+            f"Annotation storage envelope dropped/renamed field(s) {missing}. "
+            "Update EXPECTED_STORAGE_ENVELOPE and the frontend BaseAnnotation "
+            "in chartAnnotationStore.ts in lockstep."
+        )
+        # The store guard rejects an add unless these are non-empty strings.
+        assert isinstance(stored["annotation_id"], str) and stored["annotation_id"]
+        assert stored["symbol"] == "NVDA"
+        assert stored["timeframe"] == "1day"
+        assert stored["chart_id"] == "NVDA:1day"

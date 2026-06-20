@@ -13,9 +13,9 @@ import logging
 from typing import Any
 
 from psycopg.rows import dict_row
-from psycopg.types.json import Json
 
 from src.server.database.conversation import get_db_connection
+from src.server.utils.pg_sanitize import SafeJson, strip_pg_nul_str
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +55,11 @@ async def add_annotation(
                 """,
                 (
                     workspace_id,
-                    chart_id,
-                    symbol.upper(),
+                    strip_pg_nul_str(chart_id),
+                    strip_pg_nul_str(symbol.upper()),
                     timeframe,
                     annotation_id,
-                    Json(annotation),
+                    SafeJson(annotation),
                 ),
             )
 

@@ -561,6 +561,7 @@ function rectToBox(
 // and there's no usable canvas (non-DOM / jsdom without a canvas backend), so
 // we stop trying and fall back to returning named colors unchanged.
 let colorResolverCtx: CanvasRenderingContext2D | null | undefined;
+const NAMED_COLOR_CACHE_MAX = 512;
 const namedColorCache = new Map<string, string | null>();
 
 function getColorResolverCtx(): CanvasRenderingContext2D | null {
@@ -590,6 +591,7 @@ function resetColorResolver(): void {
 function resolveNamedColor(color: string): string | null {
   const cached = namedColorCache.get(color);
   if (cached !== undefined) return cached;
+  if (namedColorCache.size >= NAMED_COLOR_CACHE_MAX) namedColorCache.clear();
   const ctx = getColorResolverCtx();
   if (!ctx) {
     namedColorCache.set(color, null);
