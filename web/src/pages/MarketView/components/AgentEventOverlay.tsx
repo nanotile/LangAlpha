@@ -130,7 +130,7 @@ function EventBadge({ ev, hoverCapable }: EventBadgeProps): React.ReactElement {
           aria-label={t('marketView.chart.newsEventAria', { title: ev.title })}
           {...hoverProps}
         >
-          <span className="agent-event-badge-dot" style={{ background: ev.color }} />
+          <span className="agent-event-badge-dot" style={{ backgroundColor: ev.color }} />
           <span className="agent-event-badge-title">{ev.title}</span>
         </button>
       </Mount>
@@ -147,7 +147,7 @@ function EventBadge({ ev, hoverCapable }: EventBadgeProps): React.ReactElement {
         {...contentHover}
       >
         <div className="agent-event-pop-head">
-          <span className="agent-event-pop-dot" style={{ background: ev.color }} />
+          <span className="agent-event-pop-dot" style={{ backgroundColor: ev.color }} />
           <span className="agent-event-pop-title">{ev.title}</span>
         </div>
         <p className="agent-event-pop-detail">{ev.detail}</p>
@@ -281,7 +281,7 @@ export function AgentEventOverlay({
         <React.Fragment key={ev.id}>
           <span
             className="agent-event-anchor"
-            style={{ left: `${ev.x}px`, top: `${ev.y}px`, background: ev.color }}
+            style={{ left: `${ev.x}px`, top: `${ev.y}px`, backgroundColor: ev.color }}
           />
           <EventBadge ev={ev} hoverCapable={hoverCapable} />
         </React.Fragment>

@@ -289,8 +289,9 @@ class ManageChartAnnotationsArgs(BaseModel):
             "'clear_all' deletes every annotation on the chart (must not pass ids)."
         )
     )
-    ids: list[str] | None = Field(
+    ids: list[Annotated[str, Field(max_length=64)]] | None = Field(
         default=None,
+        max_length=100,
         description=(
             "Annotation ids to delete. Required when action='remove'. "
             "Must be omitted/None for action='list' or action='clear_all'."

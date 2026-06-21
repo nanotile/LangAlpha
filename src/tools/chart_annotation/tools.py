@@ -50,7 +50,7 @@ def _get_workspace_id(config: RunnableConfig) -> str:
 
 
 def _make_annotation_id() -> str:
-    return f"ann_{uuid.uuid4().hex[:16]}"
+    return f"ann_{uuid.uuid4().hex}"
 
 
 def _normalize_annotation(annotation: Any) -> dict[str, Any] | None:

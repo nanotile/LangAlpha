@@ -473,7 +473,7 @@ export function InlineChartAnnotationCard({
                     }}
                   >
                     <span
-                      style={{ width: 8, height: 8, borderRadius: 2.5, background: v.color, flexShrink: 0 }}
+                      style={{ width: 8, height: 8, borderRadius: 2.5, backgroundColor: v.color, flexShrink: 0 }}
                     />
                     <span
                       style={{

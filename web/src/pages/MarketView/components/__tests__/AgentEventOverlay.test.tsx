@@ -130,4 +130,26 @@ describe('AgentEventOverlay', () => {
     await flushFrame();
     expect(screen.queryByText('Q3 earnings beat')).not.toBeInTheDocument();
   });
+
+  it('applies a valid agent color but rejects a url() value (no CSS exfil channel)', async () => {
+    // A real color is applied to the badge dot via the backgroundColor longhand.
+    chartAnnotationStore.setAll('ws', 'NVDA:1day', [{ ...EVENT, color: '#22c55e' }]);
+    const okRender = renderOverlay();
+    await flushFrame();
+    const okDot = okRender.container.querySelector('.agent-event-badge-dot') as HTMLElement;
+    expect(okDot.style.backgroundColor).not.toBe('');
+    okRender.unmount();
+
+    // A url() value would have triggered a network fetch through the `background`
+    // shorthand. The backgroundColor longhand rejects it, so nothing is applied.
+    chartAnnotationStore._resetForTesting();
+    chartAnnotationStore.setAll('ws', 'NVDA:1day', [
+      { ...EVENT, color: 'url(//evil.example/beacon.gif)' },
+    ]);
+    const evilRender = renderOverlay();
+    await flushFrame();
+    const evilDot = evilRender.container.querySelector('.agent-event-badge-dot') as HTMLElement;
+    expect(evilDot.style.backgroundColor).toBe('');
+    expect(evilDot.getAttribute('style') ?? '').not.toContain('url(');
+  });
 });
