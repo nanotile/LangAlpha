@@ -36,7 +36,7 @@ import { useChartAnnotations } from '../hooks/useChartAnnotations';
 import { useChartOverlays } from '../hooks/useChartOverlays';
 import { useAgentAnnotations } from '../hooks/useAgentAnnotations';
 import { AgentEventOverlay } from './AgentEventOverlay';
-import { chartAnnotationStore, makeChartId, useAnnotationsForView, useDisplayCleared } from '../stores/chartAnnotationStore';
+import { chartAnnotationStore, makeChartId, normalizeTimeframe, useAnnotationsForView, useDisplayCleared } from '../stores/chartAnnotationStore';
 import { SlidersHorizontal, Settings2, Maximize2, Minimize2, ChevronDown, Plus, Minus, RotateCcw, Menu, X } from 'lucide-react';
 
 import { loadPref, savePref } from '../utils/prefs';
@@ -265,9 +265,14 @@ const MarketChart = React.memo(forwardRef<MarketChartHandle, MarketChartProps>((
   // Subscribe to the store directly too: `hasAgentAnnotations` drives the
   // first-class Clear button, and `agentAnnotationsCleared` suppresses the
   // drawing (data stays in the store) until the user re-opens the artifact.
-  const agentAnnotations = useAnnotationsForView(workspaceId ?? null, symbol, interval);
+  //
+  // The agent can only draw on VALID_TIMEFRAMES, so it stores under the
+  // normalized timeframe (e.g. '1s' -> '1day'). Look annotations up under the
+  // same normalized key, or they are invisible on non-agent-writable intervals.
+  const annotationInterval = normalizeTimeframe(interval);
+  const agentAnnotations = useAnnotationsForView(workspaceId ?? null, symbol, annotationInterval);
   const hasAgentAnnotations = agentAnnotations.length > 0;
-  const agentAnnotationsCleared = useDisplayCleared(workspaceId ?? null, symbol, interval);
+  const agentAnnotationsCleared = useDisplayCleared(workspaceId ?? null, symbol, annotationInterval);
   const agentMarkers = useAgentAnnotations(
     chartRef,
     candlestickSeriesRef,
@@ -275,7 +280,7 @@ const MarketChart = React.memo(forwardRef<MarketChartHandle, MarketChartProps>((
     chartMode,
     chartDataForHooks as any,
     workspaceId ?? null,
-    interval,
+    annotationInterval,
     !agentAnnotationsCleared,
     theme,
   );
@@ -1569,8 +1574,8 @@ const MarketChart = React.memo(forwardRef<MarketChartHandle, MarketChartProps>((
 
   const handleClearAgentAnnotations = useCallback(() => {
     if (!workspaceId || !symbol) return;
-    chartAnnotationStore.clearDisplay(workspaceId, makeChartId(symbol, interval));
-  }, [workspaceId, symbol, interval]);
+    chartAnnotationStore.clearDisplay(workspaceId, makeChartId(symbol, annotationInterval));
+  }, [workspaceId, symbol, annotationInterval]);
 
   const handleToggleOverlay = useCallback((key: string) => {
     setOverlayVisibility((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -1923,7 +1928,7 @@ const MarketChart = React.memo(forwardRef<MarketChartHandle, MarketChartProps>((
                   visible={!agentAnnotationsCleared}
                   workspaceId={workspaceId ?? null}
                   symbol={symbol}
-                  timeframe={interval}
+                  timeframe={annotationInterval}
                 />
               )}
               {scrollLoading && (

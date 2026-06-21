@@ -55,11 +55,11 @@ def _upsert_params(
 ) -> tuple[Any, ...]:
     """Bind tuple for ``_UPSERT_SQL`` — same NUL-stripping for every write path."""
     return (
-        workspace_id,
+        strip_pg_nul_str(workspace_id),
         strip_pg_nul_str(chart_id),
         strip_pg_nul_str(symbol.upper()),
-        timeframe,
-        annotation["annotation_id"],
+        strip_pg_nul_str(timeframe),
+        strip_pg_nul_str(annotation["annotation_id"]),
         SafeJson(annotation),
     )
 
