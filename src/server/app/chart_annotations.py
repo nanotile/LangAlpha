@@ -84,8 +84,9 @@ async def list_chart_annotations(
     """
     await _ensure_owner(workspace_id, x_user_id)
     sym = _normalize_symbol(symbol)
-    tf = timeframe.strip() if timeframe is not None else None
-    charts = await list_charts(workspace_id, sym, tf)
+    # ``timeframe`` is a validated ``Timeframe`` literal (no surrounding
+    # whitespace possible), so it's passed straight through.
+    charts = await list_charts(workspace_id, sym, timeframe)
     return ChartAnnotationListResponse(
         workspace_id=workspace_id,
         charts=[ChartInstance(**c) for c in charts],

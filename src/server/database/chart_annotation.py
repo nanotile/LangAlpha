@@ -170,6 +170,9 @@ async def list_charts(
 
     async with get_db_connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
+            # ``where`` is assembled only from the literal clause strings above;
+            # every user-supplied value is a %s placeholder bound via ``params``,
+            # so this f-string carries no SQL-injection surface.
             await cur.execute(
                 f"""
                 SELECT chart_id, symbol, timeframe, payload

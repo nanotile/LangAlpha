@@ -45,6 +45,8 @@ def upgrade() -> None:
         ON chart_annotations(workspace_id, symbol, timeframe)
     """)
 
+    # update_updated_at_column() is defined in migration 001 (initial schema)
+    # and reused here (as in 003 and 012); no redeclaration needed.
     op.execute("DROP TRIGGER IF EXISTS update_chart_annotations_updated_at ON chart_annotations")
     op.execute("""
         CREATE TRIGGER update_chart_annotations_updated_at
