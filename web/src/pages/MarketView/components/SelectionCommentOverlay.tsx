@@ -293,7 +293,7 @@ export function SelectionCommentOverlay({
   // opening click already fired before this listener attaches, so it can't
   // self-dismiss.
   useEffect(() => {
-    if (!active) return;
+    if (!activeKey) return;
     const handler = (e: PointerEvent) => {
       const card = cardRef.current;
       if (card && e.target instanceof Node && card.contains(e.target)) return;
@@ -301,7 +301,9 @@ export function SelectionCommentOverlay({
     };
     document.addEventListener('pointerdown', handler, true);
     return () => document.removeEventListener('pointerdown', handler, true);
-  }, [active, onDismiss]);
+    // Key on the primitive activeKey, not the memo'd `active` object, so the
+    // listener isn't re-subscribed on unrelated re-renders (pan/zoom).
+  }, [activeKey, onDismiss]);
 
   return (
     <div ref={hostRef} className="selection-comment-overlay">

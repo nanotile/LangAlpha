@@ -109,6 +109,9 @@ export interface MarketChartHandle {
 }
 
 /** Max OHLCV bars sent with a region selection (downsampled past this). */
+// Keep this <= the server cap (_MAX_SELECTION_BARS in additional_context.py,
+// currently 500). Raising it past the server cap makes the server silently
+// slice the payload and flag it truncated even when the client thought it wasn't.
 const MAX_SELECTION_BARS = 300;
 
 /** A drag smaller than this (px, either axis) is treated as a click, not a region. */
