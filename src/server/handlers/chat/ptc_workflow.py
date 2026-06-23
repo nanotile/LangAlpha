@@ -356,6 +356,7 @@ async def astream_ptc_workflow(
         # Extract attachment and context metadata for display in history
         # (PTC skips this block for HITL resumes — contrast with Flash)
         widget_ctxs = parse_widget_contexts(request.additional_context)
+        chart_selections = parse_chart_selection_contexts(request.additional_context)
         if request.additional_context and not request.hitl_response:
             multimodal_ctxs = parse_multimodal_contexts(request.additional_context)
             if multimodal_ctxs:
@@ -366,10 +367,9 @@ async def astream_ptc_workflow(
                 query_metadata["widget_contexts"] = serialize_widget_contexts_for_metadata(
                     widget_ctxs
                 )
-            selection_ctxs = parse_chart_selection_contexts(request.additional_context)
-            if selection_ctxs:
+            if chart_selections:
                 query_metadata["chart_selections"] = serialize_chart_selections_for_metadata(
-                    selection_ctxs
+                    chart_selections
                 )
 
         # Persist lightweight additional_context + slash command fallback
@@ -719,7 +719,6 @@ async def astream_ptc_workflow(
         # target is None on HITL-resume / checkpoint-replay (input_state is a
         # Command / None there), so injection is skipped on those turns.
         directives = parse_directive_contexts(request.additional_context)
-        chart_selections = parse_chart_selection_contexts(request.additional_context)
         inline_target = (
             input_state["messages"]
             if isinstance(input_state, dict) and input_state.get("messages")

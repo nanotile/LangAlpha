@@ -210,6 +210,7 @@ async def astream_flash_workflow(
         if effective_model:
             query_metadata["llm_model"] = effective_model
         widget_ctxs = parse_widget_contexts(request.additional_context)
+        chart_selections = parse_chart_selection_contexts(request.additional_context)
         if request.additional_context:
             multimodal_ctxs = parse_multimodal_contexts(request.additional_context)
             if multimodal_ctxs:
@@ -220,10 +221,9 @@ async def astream_flash_workflow(
                 query_metadata["widget_contexts"] = serialize_widget_contexts_for_metadata(
                     widget_ctxs
                 )
-            selection_ctxs = parse_chart_selection_contexts(request.additional_context)
-            if selection_ctxs:
+            if chart_selections:
                 query_metadata["chart_selections"] = serialize_chart_selections_for_metadata(
-                    selection_ctxs
+                    chart_selections
                 )
 
         # Persist lightweight additional_context + slash command fallback
@@ -350,7 +350,6 @@ async def astream_flash_workflow(
         # `None`, so anything appended here would be silently discarded.
         skip_inline_injection = bool(request.hitl_response) or is_checkpoint_replay
         directives = parse_directive_contexts(request.additional_context)
-        chart_selections = parse_chart_selection_contexts(request.additional_context)
         inject_inline_reminders(
             None if skip_inline_injection else messages,
             [
