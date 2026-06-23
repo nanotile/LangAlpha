@@ -497,7 +497,11 @@ const MarketChart = React.memo(forwardRef<MarketChartHandle, MarketChartProps>((
         } else {
           commitRegionSelection(drag.startX, drag.startY, endX, endY);
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        // Expected if the chart was disposed mid-gesture; anything else is a
+        // real commit bug, so surface it instead of swallowing it silently.
+        console.debug('Chart selection commit skipped:', err);
+      }
     }
     // Tool stays armed so the user can keep drawing; Esc / the tool button disarms.
   }, [commitRegionSelection, selectionSymbol, annotationInterval]);

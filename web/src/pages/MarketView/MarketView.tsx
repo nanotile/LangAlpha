@@ -6,7 +6,7 @@ import DashboardHeader from '../Dashboard/components/DashboardHeader';
 import StockHeader from './components/StockHeader';
 import MarketChart from './components/MarketChart';
 import type { MarketChartHandle } from './components/MarketChart';
-import ChatInput, { type ChatInputHandle } from '../../components/ui/chat-input';
+import ChatInput from '../../components/ui/chat-input';
 import MarketChatPanel from './components/MarketChatPanel';
 import MarketSidebarPanel from './components/MarketSidebarPanel';
 import { INTERVALS, supports1sInterval } from './utils/chartConstants';
@@ -128,8 +128,6 @@ function MarketViewInner() {
   const [chartMeta, setChartMeta] = useState<Record<string, unknown> | null>(null);
   const [selectedInterval, setSelectedInterval] = useState<string>(() => loadPref('interval', '1day'));
   const chartRef = useRef<MarketChartHandle>(null);
-  // Mobile FAB ChatInput handle.
-  const mobileChatInputRef = useRef<ChatInputHandle>(null);
   const [chartImage, setChartImage] = useState<string | null>(null);       // base64 data URL
   const [chartImageDesc, setChartImageDesc] = useState<string | null>(null); // text description for LLM
   const [showOverview, setShowOverview] = useState<boolean>(false);
@@ -634,7 +632,6 @@ function MarketViewInner() {
             className="market-mobile-chat-float"
           >
             <ChatInput
-              ref={mobileChatInputRef}
               onSend={(...args: any[]) => { (handleSendMessage as any)(...args); setChatExpanded(false); }}
               isLoading={isLoading}
               mode={mode}
