@@ -1135,32 +1135,31 @@ class TestResolveTimezone:
 
 
 class TestInjectInlineReminders:
-    def _inject(self, messages, reminders, prefix="TEST"):
+    def _inject(self, messages, reminders):
         from src.server.handlers.chat._common import inject_inline_reminders
 
-        return inject_inline_reminders(messages, reminders, log_prefix=prefix)
+        return inject_inline_reminders(messages, reminders)
 
     def test_none_messages_is_noop(self):
         # HITL-resume / checkpoint-replay path: no target list, must not raise.
-        self._inject(None, [("\nreminder", "detail")])
+        self._inject(None, ["\nreminder"])
 
     def test_empty_messages_is_noop(self):
         msgs = []
-        self._inject(msgs, [("\nreminder", "detail")])
+        self._inject(msgs, ["\nreminder"])
         assert msgs == []
 
     def test_appends_present_reminders_in_order(self):
         msgs = [{"role": "user", "content": "hi"}]
-        self._inject(msgs, [("\nA", "a"), ("\nB", "b")])
+        self._inject(msgs, ["\nA", "\nB"])
         assert msgs[-1]["content"] == "hi\nA\nB"
 
     def test_skips_absent_reminders(self):
         msgs = [{"role": "user", "content": "hi"}]
-        self._inject(msgs, [(None, "skip"), ("", "skip2"), ("\nX", "x")])
+        self._inject(msgs, [None, "", "\nX"])
         assert msgs[-1]["content"] == "hi\nX"
 
-    def test_logs_only_for_present_reminders(self):
-        msgs = [{"role": "user", "content": "hi"}]
-        with patch(f"{COMMON}.logger") as mock_logger:
-            self._inject(msgs, [("\nA", "a injected"), (None, "skipped")], prefix="PTC_CHAT")
-        mock_logger.info.assert_called_once_with("[PTC_CHAT] a injected")
+    def test_does_not_append_to_non_user_tail(self):
+        msgs = [{"role": "assistant", "content": "x"}]
+        self._inject(msgs, ["\nA"])
+        assert msgs[-1]["content"] == "x"

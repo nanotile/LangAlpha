@@ -354,20 +354,10 @@ async def astream_flash_workflow(
         inject_inline_reminders(
             None if skip_inline_injection else messages,
             [
-                (
-                    build_directive_reminder(directives),
-                    f"Directive context injected inline ({len(directives)} directives)",
-                ),
-                (
-                    build_widget_context_reminder(widget_ctxs),
-                    f"Widget context injected inline ({len(widget_ctxs)} widgets)",
-                ),
-                (
-                    build_chart_selection_reminder(chart_selections),
-                    f"Chart selection injected inline ({len(chart_selections)} selections)",
-                ),
+                build_directive_reminder(directives),
+                build_widget_context_reminder(widget_ctxs),
+                build_chart_selection_reminder(chart_selections),
             ],
-            log_prefix="FLASH_CHAT",
         )
 
         # Build input state or resume command -- Flash-specific (no
