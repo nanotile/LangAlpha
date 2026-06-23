@@ -8,6 +8,12 @@ function makeBars(n: number): Array<{ i: number }> {
 }
 
 describe('downsampleBars', () => {
+  it('throws when max is not a positive integer', () => {
+    expect(() => downsampleBars(makeBars(10), 0)).toThrow(RangeError);
+    expect(() => downsampleBars(makeBars(10), -1)).toThrow(RangeError);
+    expect(() => downsampleBars(makeBars(10), 1.5)).toThrow(RangeError);
+  });
+
   it('passes through unchanged when n <= max (truncated false)', () => {
     const bars = makeBars(10);
     const out = downsampleBars(bars, 300);
