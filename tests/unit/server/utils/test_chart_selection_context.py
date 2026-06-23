@@ -146,15 +146,16 @@ class TestBuildChartSelectionReminder:
         assert "<chart-selection chart_id='NVDA:1day' selection_type='region'>" in result
         # Bounds.
         assert "Time range: 2024-01-03T00:00:00.000Z → 2024-02-15T00:00:00.000Z" in result
-        assert "180.5" in result and "195.0" in result
+        assert "180.5" in result and "195" in result
         # OHLCV table.
         assert "| time | open | high | low | close | volume |" in result
-        # Numeric cells render as floats (bar OHLCV fields are typed float).
-        assert "| 2024-01-03T00:00:00.000Z | 1.0 | 2.0 | 1.0 | 2.0 | 1000.0 |" in result
+        # Prices render via %g (FP-noise stripped, trailing .0 dropped); volume
+        # stays a plain float string.
+        assert "| 2024-01-03T00:00:00.000Z | 1 | 2 | 1 | 2 | 1000.0 |" in result
         # Draw-back line: rectangle corners map to (start, high) / (end, low).
         assert "To annotate this back onto the chart, call draw_chart_annotation(" in result
         assert '"type": "rectangle"' in result
-        assert '"point1": {"time": "2024-01-03T00:00:00.000Z", "price": 195.0}' in result
+        assert '"point1": {"time": "2024-01-03T00:00:00.000Z", "price": 195}' in result
         assert '"point2": {"time": "2024-02-15T00:00:00.000Z", "price": 180.5}' in result
 
     def test_price_level_renders_single_price_and_price_line(self):
@@ -162,12 +163,28 @@ class TestBuildChartSelectionReminder:
         result = build_chart_selection_reminder([sel])
         assert result is not None
         assert "<chart-selection chart_id='AAPL:1hour' selection_type='price_level'>" in result
-        assert "Price level: 200.0" in result
+        assert "Price level: 200" in result
         # No region-only time range line.
         assert "Time range:" not in result
         # Empty bars → no OHLCV table.
         assert "| time | open | high | low | close | volume |" not in result
-        assert '"type": "price_line", "price": 200.0' in result
+        assert '"type": "price_line", "price": 200' in result
+
+    def test_price_noise_stripped_in_render(self):
+        # Pixel→price interpolation can deliver 195.10000000000002; the rendered
+        # level and draw-back hint should show the clean 195.1.
+        sel = ChartSelectionContext(
+            symbol="NVDA",
+            timeframe="1day",
+            selection_type="price_level",
+            price_low=195.10000000000002,
+            price_high=195.10000000000002,
+        )
+        result = build_chart_selection_reminder([sel])
+        assert result is not None
+        assert "195.10000000000002" not in result
+        assert "Price level: 195.1" in result
+        assert '"price": 195.1' in result
 
     def test_includes_explainer_preamble(self):
         [sel] = parse_chart_selection_contexts([_REGION_DICT])

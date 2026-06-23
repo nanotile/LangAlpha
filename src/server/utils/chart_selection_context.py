@@ -62,6 +62,20 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _fmt_price(value: Optional[float]) -> str:
+    """Render a price, dropping pixel-interpolation FP noise.
+
+    Selection bounds come from client pixel→price interpolation, so a clean
+    195.10 can arrive as 195.10000000000002. ``%g`` is magnitude-aware: it strips
+    that noise without a fixed decimal count, so sub-dollar and large prices both
+    keep their real precision (and unlike volume, prices never need %g's
+    scientific fallback at realistic magnitudes).
+    """
+    if value is None:
+        return ""
+    return f"{value:.12g}"
+
+
 def _render_bars_table(bars: List[SelectionBar]) -> tuple[str, str]:
     """Render an OHLCV markdown table plus a truncation note.
 
@@ -72,10 +86,10 @@ def _render_bars_table(bars: List[SelectionBar]) -> tuple[str, str]:
     rows = [
         "| {time} | {open} | {high} | {low} | {close} | {volume} |".format(
             time=_fmt(b.time),
-            open=_fmt(b.open),
-            high=_fmt(b.high),
-            low=_fmt(b.low),
-            close=_fmt(b.close),
+            open=_fmt_price(b.open),
+            high=_fmt_price(b.high),
+            low=_fmt_price(b.low),
+            close=_fmt_price(b.close),
             volume=_fmt(b.volume),
         )
         for b in shown
@@ -100,20 +114,20 @@ def _render_selection(sel: ChartSelectionContext) -> str:
 
     if sel.selection_type == "region":
         lines.append(f"Time range: {sel.time_start} → {sel.time_end}")
-        lines.append(f"Price range: {_fmt(sel.price_low)} – {_fmt(sel.price_high)}")
+        lines.append(f"Price range: {_fmt_price(sel.price_low)} – {_fmt_price(sel.price_high)}")
         draw_back = (
             "To annotate this back onto the chart, call draw_chart_annotation("
             f'symbol="{symbol}", timeframe="{sel.timeframe}", annotation='
             '{"type": "rectangle", '
-            f'"point1": {{"time": "{sel.time_start}", "price": {_fmt(sel.price_high)}}}, '
-            f'"point2": {{"time": "{sel.time_end}", "price": {_fmt(sel.price_low)}}}}}).'
+            f'"point1": {{"time": "{sel.time_start}", "price": {_fmt_price(sel.price_high)}}}, '
+            f'"point2": {{"time": "{sel.time_end}", "price": {_fmt_price(sel.price_low)}}}}}).'
         )
     else:
-        lines.append(f"Price level: {_fmt(sel.price_low)}")
+        lines.append(f"Price level: {_fmt_price(sel.price_low)}")
         draw_back = (
             "To annotate this back onto the chart, call draw_chart_annotation("
             f'symbol="{symbol}", timeframe="{sel.timeframe}", annotation='
-            f'{{"type": "price_line", "price": {_fmt(sel.price_low)}}}).'
+            f'{{"type": "price_line", "price": {_fmt_price(sel.price_low)}}}).'
         )
 
     table, note = _render_bars_table(sel.bars)
