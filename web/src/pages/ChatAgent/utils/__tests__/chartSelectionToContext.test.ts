@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { chartSelectionToContext } from '../fileUpload';
+import { chartSelectionToContext, describeSelectionImage } from '../fileUpload';
 import type { ChartSelection } from '@/pages/MarketView/stores/chartSelectionStore';
 
 function region(overrides: Partial<ChartSelection> = {}): ChartSelection {
@@ -38,11 +38,22 @@ describe('chartSelectionToContext', () => {
     expect(item.bars_truncated).toBe(false);
   });
 
-  it('emits only the structured item — never an image item', () => {
+  it('omits the image item when the region carries no cropped screenshot', () => {
     const out = chartSelectionToContext(region({ comment: 'note' }));
     expect(out).toHaveLength(1);
     expect((out[0] as unknown as Record<string, unknown>).type).toBe('chart_selection');
     expect(out.every((i) => (i as unknown as Record<string, unknown>).type !== 'image')).toBe(true);
+  });
+
+  it('emits a sibling image item when the region carries a cropped screenshot', () => {
+    const out = chartSelectionToContext(region({ croppedImage: 'data:image/jpeg;base64,AAAA' }));
+    expect(out).toHaveLength(2);
+    expect((out[0] as unknown as Record<string, unknown>).type).toBe('chart_selection');
+    const img = out[1] as unknown as Record<string, unknown>;
+    expect(img.type).toBe('image');
+    expect(img.data).toBe('data:image/jpeg;base64,AAAA');
+    expect(typeof img.description).toBe('string');
+    expect(img.description as string).toContain('NVDA');
   });
 
   it('carries a trimmed comment as the item label', () => {
@@ -82,5 +93,24 @@ describe('chartSelectionToContext', () => {
   it('passes through when the live chart still matches (case-insensitive symbol)', () => {
     const out = chartSelectionToContext(region(), { symbol: 'nvda', timeframe: '1day' });
     expect(out).toHaveLength(1);
+  });
+});
+
+describe('describeSelectionImage', () => {
+  // This caption is the single source for both the image context `description`
+  // and the display-attachment `name`, so its exact shape is worth locking.
+  it('renders the full caption with price range and time span for a region', () => {
+    expect(describeSelectionImage(region())).toBe(
+      'Cropped chart image of NVDA 1day (price $180–$195, ' +
+        '2024-01-03T00:00:00.000Z → 2024-02-15T00:00:00.000Z)',
+    );
+  });
+
+  it('omits the time span for a price level (no time bounds)', () => {
+    const cap = describeSelectionImage(
+      region({ selectionType: 'price_level', timeStart: undefined, timeEnd: undefined, priceLow: 200, priceHigh: 200 }),
+    );
+    expect(cap).toBe('Cropped chart image of NVDA 1day (price $200–$200)');
+    expect(cap).not.toContain('→');
   });
 });

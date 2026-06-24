@@ -130,14 +130,28 @@ interface ChartSelectionCtxItem {
   label?: string;
 }
 
+interface ChartSelectionImageItem {
+  type: 'image';
+  data: string;
+  description: string;
+}
+
+/** Caption for a region's cropped screenshot — the structured item holds the exact values. */
+export function describeSelectionImage(sel: ChartSelection): string {
+  const range = `$${sel.priceLow}–$${sel.priceHigh}`;
+  const span = sel.timeStart && sel.timeEnd ? `, ${sel.timeStart} → ${sel.timeEnd}` : '';
+  return `Cropped chart image of ${sel.symbol} ${sel.timeframe} (price ${range}${span})`;
+}
+
 /**
  * Map a user's chart selection to `additional_context` items.
  *
  * Emits one structured `chart_selection` item (bounds + per-candle OHLCV the
- * agent can analyze and draw back onto the exact region). The selection's chat
- * representation is the inline pill/card built from this same data — no cropped
- * screenshot rides along (it persisted as an empty preview-less attachment on
- * history replay and added little over the exact OHLCV bars).
+ * agent can analyze and draw back onto the exact region). A region selection
+ * with a cropped screenshot also emits a sibling `{type:"image", ...}` item
+ * that rides the existing MultimodalContext channel — a vision-capable model
+ * sees the region directly, others fall back to the bars via the backend
+ * modality gate. The structured bars stay the primary signal.
  *
  * Pass `liveSymbol`/`liveTimeframe` to drop a stale selection (the chart was
  * switched to a different instance after the user drew it).
@@ -145,7 +159,7 @@ interface ChartSelectionCtxItem {
 export function chartSelectionToContext(
   sel: ChartSelection,
   live?: { symbol?: string | null; timeframe?: string | null },
-): ChartSelectionCtxItem[] {
+): Array<ChartSelectionCtxItem | ChartSelectionImageItem> {
   if (live) {
     const liveSym = (live.symbol ?? '').toUpperCase();
     const liveTf = live.timeframe ?? '';
@@ -172,7 +186,11 @@ export function chartSelectionToContext(
   // The user's per-selection note rides as `label`, separate from the message.
   if (comment) item.label = comment;
 
-  return [item];
+  const out: Array<ChartSelectionCtxItem | ChartSelectionImageItem> = [item];
+  if (sel.croppedImage) {
+    out.push({ type: 'image', data: sel.croppedImage, description: describeSelectionImage(sel) });
+  }
+  return out;
 }
 
 /**
