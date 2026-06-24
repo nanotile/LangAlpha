@@ -1132,3 +1132,34 @@ class TestResolveTimezone:
 
         mock_locale.assert_called_once_with("en-US", "en")
         assert result == "UTC"
+
+
+class TestInjectInlineReminders:
+    def _inject(self, messages, reminders):
+        from src.server.handlers.chat._common import inject_inline_reminders
+
+        return inject_inline_reminders(messages, reminders)
+
+    def test_none_messages_is_noop(self):
+        # HITL-resume / checkpoint-replay path: no target list, must not raise.
+        self._inject(None, ["\nreminder"])
+
+    def test_empty_messages_is_noop(self):
+        msgs = []
+        self._inject(msgs, ["\nreminder"])
+        assert msgs == []
+
+    def test_appends_present_reminders_in_order(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        self._inject(msgs, ["\nA", "\nB"])
+        assert msgs[-1]["content"] == "hi\nA\nB"
+
+    def test_skips_absent_reminders(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        self._inject(msgs, [None, "", "\nX"])
+        assert msgs[-1]["content"] == "hi\nX"
+
+    def test_does_not_append_to_non_user_tail(self):
+        msgs = [{"role": "assistant", "content": "x"}]
+        self._inject(msgs, ["\nA"])
+        assert msgs[-1]["content"] == "x"
