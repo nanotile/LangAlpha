@@ -45,7 +45,6 @@ interface SelectionCommentOverlayProps {
   symbol: string;
   /** Normalized timeframe currently on screen. */
   timeframe: string;
-  theme: 'light' | 'dark';
 }
 
 interface PinLayout {
@@ -66,7 +65,6 @@ export function SelectionCommentOverlay({
   seriesRef,
   symbol,
   timeframe,
-  theme,
 }: SelectionCommentOverlayProps): React.ReactElement {
   const { t } = useTranslation();
   const { selections, activeId } = useChartSelections();
@@ -244,7 +242,10 @@ export function SelectionCommentOverlay({
       cancelAnimationFrame(raf);
       if (scheduled) cancelAnimationFrame(scheduled);
     };
-  }, [recompute, confirmed, active, theme, chartRef]);
+    // Key on the primitive activeKey, not the memo'd `active` object: recompute
+    // reads selections via refs, so this only needs to re-run when the active
+    // *identity* changes. Same reasoning as the outside-click effect below.
+  }, [recompute, confirmed, activeKey, chartRef]);
 
   const onPrimary = useCallback(() => {
     const sel = activeRef.current;

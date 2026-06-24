@@ -219,7 +219,7 @@ function InlineSelectionCards({ selections }: { selections: SelectionPreviewShap
   const [previewed, setPreviewed] = useState<SelectionPreviewShape | null>(null);
   return (
     <div className="flex flex-col items-end gap-1.5">
-      {selections.map((s, idx) => {
+      {selections.map((s) => {
         const Icon = s.selectionType === 'region' ? SquareDashedMousePointer : Ruler;
         const title = s.selectionType === 'region'
           ? t('marketView.selection.cardRegionTitle')
@@ -231,7 +231,7 @@ function InlineSelectionCards({ selections }: { selections: SelectionPreviewShap
         const snippet = s.comment ? `“${s.comment}”` : bounds;
         return (
           <button
-            key={idx}
+            key={`${s.selectionType}-${s.symbol}-${s.timeframe}-${s.priceLow}-${s.priceHigh}-${s.timeStart ?? ''}`}
             type="button"
             onClick={() => setPreviewed(s)}
             title={t('marketView.selection.cardOpenPreview')}

@@ -2297,7 +2297,6 @@ const MarketChart = React.memo(forwardRef<MarketChartHandle, MarketChartProps>((
                   seriesRef={candlestickSeriesRef}
                   symbol={selectionSymbol}
                   timeframe={annotationInterval}
-                  theme={theme as 'light' | 'dark'}
                 />
               )}
               {scrollLoading && (
