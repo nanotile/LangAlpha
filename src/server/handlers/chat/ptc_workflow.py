@@ -74,10 +74,10 @@ from ._common import (
     handle_workflow_error,
     init_tracking,
     inject_inline_reminders,
-    inject_skills,
     logger,
     normalize_request_messages,
     persist_or_skip_replay,
+    prepare_skill_contexts,
     process_hitl_response,
     serialize_context_metadata,
     setup_steering_tracking,
@@ -565,21 +565,24 @@ async def astream_ptc_workflow(
         messages = normalize_request_messages(request)
 
         # =====================================================================
-        # Skill Context Injection (inline with last user message)
+        # Skill Context Resolution (body injection happens in SkillsMiddleware)
         # =====================================================================
-        # When skills are requested via additional_context, load SKILL.md content
-        # and append inline to the last user message using <loaded-skill> tags.
-        # The original user_input is preserved for database persistence.
+        # Resolve which skills this turn activates — from additional_context or a
+        # leading /<command> in the message (stripped in place). The SKILL.md body
+        # is injected by SkillsMiddleware at turn entry, which dedups against bodies
+        # already live in the thread so a re-sent skill isn't pasted every turn.
         #
-        # Server-side slash command detection: also scan the last user message
-        # for /<command> prefixes as a fallback when additional_context is missing.
-        #
-        # PTC guards skill injection with `not request.hitl_response` because the
-        # helper does not guard the build_skill_content call itself.
-        if not request.hitl_response:
-            loaded_skill_names = inject_skills(messages, request, config, mode="ptc")
+        # Only set on normal turns: HITL resumes and checkpoint replays carry no new
+        # user message, so the middleware must not inject (mirrors the prior guard).
+        if not request.hitl_response and not is_checkpoint_replay:
+            skill_contexts = prepare_skill_contexts(messages, request, mode="ptc")
         else:
-            loaded_skill_names = []
+            skill_contexts = []
+        skill_dirs = (
+            [local_dir for local_dir, _ in config.skills.local_skill_dirs_with_sandbox()]
+            if skill_contexts
+            else None
+        )
 
         # Multimodal Context Injection
         # All attachments are uploaded to sandbox (when available) so the
@@ -682,9 +685,7 @@ async def astream_ptc_workflow(
                 "messages": messages,
                 "current_agent": "ptc",  # For FileOperationMiddleware SSE events
             }
-            # Auto-load skill tools when skills were injected via additional_context
-            if loaded_skill_names:
-                input_state["loaded_skills"] = loaded_skill_names
+            # Skill tools auto-load via SkillsMiddleware (sets loaded_skills in state).
 
         # =====================================================================
         # Plan Mode Injection
@@ -765,6 +766,8 @@ async def astream_ptc_workflow(
             is_byok=is_byok,
             recursion_limit=get_ptc_recursion_limit(),
             plan_mode=effective_plan_mode,
+            skill_contexts=skill_contexts,
+            skill_dirs=skill_dirs,
         )
         # Propagate run_id to LangGraph via the top-level config key; it
         # lands on ExecutionInfo.run_id and CheckpointMetadata.run_id so

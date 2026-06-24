@@ -1,0 +1,259 @@
+"""Tests for the skill content layer (``ptc_agent`` skills middleware).
+
+Covers two pure functions that the SkillsMiddleware composes:
+
+- ``build_skill_content`` — the already-loaded dedup that keeps a re-sent skill's
+  SKILL.md body from being re-injected every turn while still refreshing its
+  (per-turn) instruction.
+- ``compute_already_loaded`` — which skills' bodies are still live in the
+  effective (post-compaction) message window, so the body can be skipped.
+
+Import + patch targets use the ``src.`` prefix consistently: ``src.ptc_agent.X``
+and ``ptc_agent.X`` are distinct module objects, so the patch namespace must match
+the import namespace or ``patch`` hits the wrong module.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.ptc_agent.agent.middleware.skills.content import (
+    SkillRequest,
+    build_skill_content,
+    compute_already_loaded,
+)
+
+MOD = "src.ptc_agent.agent.middleware.skills.content"
+
+
+def _ctx(name: str, instruction: str | None = None) -> SkillRequest:
+    return SkillRequest(name=name, instruction=instruction)
+
+
+@pytest.fixture(autouse=True)
+def _skill_exposed_in_mode():
+    """The already-loaded branch calls ``get_skill(name, mode)`` to confirm the
+    skill is still exposed in the current mode. Default it truthy so the dedup
+    tests exercise the skip path; the mode-mismatch test overrides it to None.
+    """
+    with patch(f"{MOD}.get_skill", return_value=MagicMock()):
+        yield
+
+
+# ---------------------------------------------------------------------------
+# build_skill_content
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_skill_injects_full_body_and_instruction():
+    with (
+        patch(f"{MOD}.load_skill_content", return_value="SKILL BODY"),
+        patch(f"{MOD}.build_tool_descriptions", return_value=None),
+    ):
+        result = build_skill_content([_ctx("chart-annotation", "draw on AAPL:1day")])
+
+    assert result is not None
+    assert result.loaded_skill_names == ["chart-annotation"]
+    assert '<loaded-skill name="chart-annotation">' in result.content
+    assert "SKILL BODY" in result.content
+    assert "[Instruction: draw on AAPL:1day]" in result.content
+
+
+def test_already_loaded_skill_skips_body_keeps_instruction():
+    with (
+        patch(f"{MOD}.load_skill_content", return_value="SKILL BODY") as load,
+        patch(f"{MOD}.build_tool_descriptions", return_value=None),
+    ):
+        result = build_skill_content(
+            [_ctx("chart-annotation", "draw on NVDA:1hour")],
+            already_loaded={"chart-annotation"},
+        )
+
+    # Body is not re-pasted and the skill is not re-counted as freshly loaded...
+    assert result is not None
+    assert result.loaded_skill_names == []
+    assert "<loaded-skill" not in result.content
+    assert "SKILL BODY" not in result.content
+    load.assert_not_called()
+    # ...but the fresh instruction (current symbol/timeframe) still rides.
+    assert "[Instruction: draw on NVDA:1hour]" in result.content
+
+
+def test_already_loaded_skill_without_instruction_returns_none():
+    with (
+        patch(f"{MOD}.load_skill_content", return_value="SKILL BODY"),
+        patch(f"{MOD}.build_tool_descriptions", return_value=None),
+    ):
+        result = build_skill_content(
+            [_ctx("chart-annotation")],
+            already_loaded={"chart-annotation"},
+        )
+
+    # Nothing to inject: body skipped, no instruction to refresh.
+    assert result is None
+
+
+def test_mixed_fresh_and_already_loaded():
+    def fake_load(name, skill_dirs=None, mode=None):
+        return f"BODY:{name}"
+
+    with (
+        patch(f"{MOD}.load_skill_content", side_effect=fake_load),
+        patch(f"{MOD}.build_tool_descriptions", return_value=None),
+    ):
+        result = build_skill_content(
+            [
+                _ctx("chart-annotation", "draw on AAPL:1day"),
+                _ctx("research", "find news"),
+            ],
+            already_loaded={"chart-annotation"},
+        )
+
+    assert result is not None
+    # Only the not-yet-loaded skill gets a body and a fresh-name entry.
+    assert result.loaded_skill_names == ["research"]
+    assert "BODY:research" in result.content
+    assert "BODY:chart-annotation" not in result.content
+    assert '<loaded-skill name="research">' in result.content
+    # Both instructions are listed (multi-instruction format).
+    assert "[Instructions]" in result.content
+    assert "- chart-annotation: draw on AAPL:1day" in result.content
+    assert "- research: find news" in result.content
+
+
+def test_single_instruction_across_multiple_skills_uses_named_format():
+    """A fresh skill body plus a *different* already-loaded skill's instruction
+    means two skills are represented, so the lone instruction must be named —
+    the bare ``[Instruction: ...]`` form would read as belonging to the fresh
+    skill's body block instead of its real owner.
+    """
+    with (
+        patch(f"{MOD}.load_skill_content", return_value="SKILL BODY"),
+        patch(f"{MOD}.build_tool_descriptions", return_value=None),
+    ):
+        result = build_skill_content(
+            [
+                _ctx("research"),  # fresh, no instruction -> body block only
+                _ctx("chart-annotation", "draw on NVDA:1day"),  # already loaded -> instruction only
+            ],
+            already_loaded={"chart-annotation"},
+        )
+
+    assert result is not None
+    assert result.loaded_skill_names == ["research"]
+    assert '<loaded-skill name="research">' in result.content
+    # Two skills represented -> named list, never the bare shorthand.
+    assert "[Instructions]" in result.content
+    assert "- chart-annotation: draw on NVDA:1day" in result.content
+    assert "[Instruction: draw on NVDA:1day]" not in result.content
+
+
+def test_already_loaded_but_mode_mismatch_drops_instruction():
+    """A stale loaded_skills entry for a skill no longer exposed in the current
+    mode must NOT short-circuit to an instruction-only inject — the mode re-check
+    fails, the skill falls through to the fresh path, and load_skill_content
+    (which also mode-gates) rejects it. Net: nothing is injected, so a caller
+    can't smuggle an instruction past the mode gate via a stale loaded set.
+    """
+    with (
+        patch(f"{MOD}.get_skill", return_value=None),  # not exposed in this mode
+        patch(f"{MOD}.load_skill_content", return_value=None),  # fresh path also rejects
+        patch(f"{MOD}.build_tool_descriptions", return_value=None),
+    ):
+        result = build_skill_content(
+            [_ctx("chart-annotation", "draw on NVDA:1day")],
+            already_loaded={"chart-annotation"},
+            mode="flash",
+        )
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# compute_already_loaded
+# ---------------------------------------------------------------------------
+
+
+def test_compute_filters_non_str_names():
+    """Only string skill names survive."""
+    result = compute_already_loaded(
+        ["chart-annotation", None, 7, "research"], [], None
+    )
+    assert result == {"chart-annotation", "research"}
+
+
+def test_compute_empty_loaded_returns_empty():
+    assert compute_already_loaded([], [{"content": "hi"}], None) == set()
+    assert compute_already_loaded(None, None, None) == set()
+
+
+def test_compute_no_compaction_trusts_loaded_set():
+    """Without a compaction event the full history is in the model's view, so
+    every loaded skill's body still survives — no marker scan needed."""
+    result = compute_already_loaded(
+        ["chart-annotation"],
+        [{"content": "hi"}],  # marker not present, but no compaction
+        None,
+    )
+    assert result == {"chart-annotation"}
+
+
+def test_compute_event_without_cutoff_trusts_loaded_set():
+    """A summarization event with no/zero cutoff_index means nothing was actually
+    summarized away, so trust the loaded set as-is."""
+    assert compute_already_loaded(
+        ["chart-annotation"], [{"content": "hi"}], {"cutoff_index": 0}
+    ) == {"chart-annotation"}
+
+
+def test_compute_compaction_drops_body_before_cutoff():
+    """After compaction, a skill whose injected body now sits *before* the
+    cutoff is dropped so the body gets re-injected."""
+    result = compute_already_loaded(
+        ["chart-annotation"],
+        [
+            {"content": '<loaded-skill name="chart-annotation">body</loaded-skill>'},
+            {"content": "assistant reply"},
+            {"content": "later user turn"},  # messages[2:] — no marker
+        ],
+        {"cutoff_index": 2, "summary_message": {"content": "compacted summary"}},
+    )
+    assert result == set()
+
+
+def test_compute_compaction_keeps_body_after_cutoff():
+    """A skill whose body marker still appears in the surviving tail
+    (messages[cutoff:]) stays in the dedup set — no need to re-inject."""
+    result = compute_already_loaded(
+        ["chart-annotation", "research"],
+        [
+            {"content": "pre-cutoff summarized turn"},
+            {"content": '<loaded-skill name="chart-annotation">body</loaded-skill>'},
+            {"content": "another turn"},
+        ],
+        {"cutoff_index": 1, "summary_message": {"content": "compacted summary"}},
+    )
+    # Only chart-annotation's marker survives the cutoff; research's body is gone.
+    assert result == {"chart-annotation"}
+
+
+def test_compute_compaction_ignores_marker_inside_summary():
+    """A body that survives only inside the (lossy) summary message is gone
+    verbatim — get_effective_messages prepends the summary at index 0 and we
+    scan from index 1, so such a skill is dropped and re-injected."""
+    result = compute_already_loaded(
+        ["chart-annotation"],
+        [
+            {"content": '<loaded-skill name="chart-annotation">body</loaded-skill>'},
+            {"content": "assistant reply"},
+            {"content": "later user turn"},  # surviving tail — no marker
+        ],
+        {
+            "cutoff_index": 2,
+            # Marker present in the summary, but the summary is lossy prose.
+            "summary_message": {
+                "content": 'mentions <loaded-skill name="chart-annotation"> once'
+            },
+        },
+    )
+    assert result == set()
