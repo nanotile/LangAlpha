@@ -499,9 +499,14 @@ function ChatBody(props: ChatBodyProps): React.ReactElement {
       // the live (sym, tf); a stale one is dropped. The same set is snapshotted
       // for the sent message's cards, and a lone note becomes the message text
       // when the user typed nothing (so the bubble isn't empty).
-      const { contexts: selectionContexts, snapshots: selectionSnapshots, outgoingMessage } =
-        buildChartSelectionSend(sym, tf, message);
+      const {
+        contexts: selectionContexts,
+        snapshots: selectionSnapshots,
+        attachments: selectionAttachments,
+        outgoingMessage,
+      } = buildChartSelectionSend(sym, tf, message);
       contexts.push(...selectionContexts);
+      metaItems.push(...selectionAttachments);
 
       const additionalContext = contexts.length > 0 ? contexts : null;
       const attachmentMeta = metaItems.length > 0 ? metaItems : null;

@@ -50,6 +50,29 @@ describe('buildChartSelectionSend', () => {
     expect(snapshots[0]).toMatchObject({ symbol: 'NVDA', timeframe: '1day', comment: 'resistance retest' });
   });
 
+  it('includes the region screenshot as a sibling image context + display attachment when captured', () => {
+    const id = chartSelectionStore.beginDraft(makeRegionInput({ croppedImage: 'data:image/jpeg;base64,ZZZZ' }));
+    chartSelectionStore.confirm(id, '');
+
+    const { contexts, attachments } = buildChartSelectionSend('NVDA', '1day', 'analyze');
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]).toMatchObject({ type: 'chart_selection' });
+    expect(contexts[1]).toMatchObject({ type: 'image', data: 'data:image/jpeg;base64,ZZZZ' });
+    // Display attachment carries the base64 as preview so the live bubble shows a thumbnail.
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({
+      type: 'image',
+      preview: 'data:image/jpeg;base64,ZZZZ',
+      dataUrl: 'data:image/jpeg;base64,ZZZZ',
+    });
+  });
+
+  it('emits no display attachment when the region has no cropped screenshot', () => {
+    const id = chartSelectionStore.beginDraft(makeRegionInput());
+    chartSelectionStore.confirm(id, '');
+    expect(buildChartSelectionSend('NVDA', '1day', 'analyze').attachments).toEqual([]);
+  });
+
   it('drops a selection drawn on a different (symbol, timeframe)', () => {
     const here = chartSelectionStore.beginDraft(makeRegionInput());
     chartSelectionStore.confirm(here, 'here');
