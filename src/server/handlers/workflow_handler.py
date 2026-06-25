@@ -179,7 +179,6 @@ async def get_workflow_status(thread_id: str) -> dict:
                 checkpoint_info = {
                     "has_plan": False,  # PTC doesn't use plans
                     "has_final_report": bool(state_values.get("final_report")),
-                    "message_count": len(state_values.get("messages", [])),
                     "completed": len(pending_sends) == 0,
                     "checkpoint_id": checkpoint_tuple.config.get(
                         "configurable", {}
