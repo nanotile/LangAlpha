@@ -12,6 +12,7 @@ Actions emitted via context_window events (values preserved as wire protocol):
 - offload: complete signal after Tier 1 tool arg truncation
 """
 
+import asyncio
 import uuid
 import warnings
 import logging
@@ -34,6 +35,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain.chat_models import BaseChatModel, init_chat_model
 
+from src.config.settings import get_compaction_timeout
 from src.llms.content_utils import format_llm_content
 from src.llms.token_counter import extract_token_usage
 from ptc_agent.config.agent import CompactionConfig
@@ -576,7 +578,10 @@ class CompactionMiddleware(AgentMiddleware):
         cached_input_tokens = 0
         cached_output_tokens = 0
 
-        # Sync path skips backend persistence (SandboxBackend is async-only)
+        # Sync path skips backend persistence (SandboxBackend is async-only).
+        # It is not the runtime path (the agent runs async via abefore_model /
+        # _acreate_summary, which carries the compaction_timeout); a blocking
+        # invoke() can't be bounded by asyncio.wait_for, so no timeout here.
         file_path = None
 
         summary = self._create_summary(
@@ -1189,8 +1194,17 @@ class CompactionMiddleware(AgentMiddleware):
             # The bracketing context_window summarize start/complete/error
             # events tell the SSE handler to re-route chunks emitted between
             # them to the compaction_chunk channel.
-            response = await self.model.ainvoke(
-                _build_summary_request(self.summary_prompt, trimmed_messages)
+            #
+            # Wall-clock budget: a hung summarize raises TimeoutError, which the
+            # except below treats like any LLM failure — emits the error signal
+            # (closing the window so the admission guard releases) and returns a
+            # fallback string. The timeout lives on the call so it fails
+            # naturally instead of blocking the in-flight turn forever.
+            response = await asyncio.wait_for(
+                self.model.ainvoke(
+                    _build_summary_request(self.summary_prompt, trimmed_messages)
+                ),
+                timeout=get_compaction_timeout(),
             )
             summary = self._extract_summary_text(response)
         except BaseException as e:

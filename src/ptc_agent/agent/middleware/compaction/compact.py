@@ -1,5 +1,6 @@
 """Standalone functions for manual compaction and offloading triggers."""
 
+import asyncio
 import logging
 import uuid
 from typing import Any, cast
@@ -10,6 +11,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from langchain.chat_models import BaseChatModel
 
+from src.config.settings import get_compaction_timeout
 from src.llms.content_utils import format_llm_content
 from ptc_agent.config.agent import CompactionConfig
 from src.llms import get_llm_by_type
@@ -197,9 +199,17 @@ async def compact_messages(
     # and fabricating a fake summary would corrupt state (a "compacted" cutoff
     # with garbage summary text) while reporting HTTP 200 to the client.
     # trigger_compaction's outer except converts the raise into HTTP 500.
+    #
+    # The call carries its own wall-clock budget: a hung summarize raises
+    # TimeoutError here (rather than blocking the thread forever), which the
+    # except below re-raises -> HTTP 500. The timeout lives on the call, not on
+    # a flat admission-side 409 clock.
     try:
-        response = await compaction_model.ainvoke(
-            _build_summary_request(DEFAULT_SUMMARY_PROMPT, messages_to_summarize)
+        response = await asyncio.wait_for(
+            compaction_model.ainvoke(
+                _build_summary_request(DEFAULT_SUMMARY_PROMPT, messages_to_summarize)
+            ),
+            timeout=get_compaction_timeout(),
         )
     except Exception as e:
         logger.error(f"[Compaction] manual compact LLM call failed: {e}")

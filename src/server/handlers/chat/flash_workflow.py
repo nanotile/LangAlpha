@@ -58,6 +58,7 @@ from ._common import (
     _append_to_last_user_message,
     _resolve_timezone,
     _setup_fork_and_persistence,
+    admission_conflict_detail,
     apply_fetch_override,
     build_graph_config,
     ensure_thread,
@@ -159,13 +160,10 @@ async def astream_flash_workflow(
                 thread_id, exclude_run_id=run_id
             )
             if state != "fresh":
-                detail = (
-                    f"Workflow {thread_id} is stopping; retry shortly."
-                    if state == "stopping"
-                    else f"Workflow {thread_id} is still running; dispatched "
-                    "follow-up could not be admitted."
+                raise HTTPException(
+                    status_code=409,
+                    detail=admission_conflict_detail(thread_id, state),
                 )
-                raise HTTPException(status_code=409, detail=detail)
             ready, steering_event = True, None
         else:
             ready, steering_event = await wait_or_steer(

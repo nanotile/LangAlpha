@@ -663,6 +663,23 @@ def build_graph_config(
     return graph_config
 
 
+def admission_conflict_detail(thread_id: str, state: str) -> str:
+    """Map a non-fresh admission state to the dispatched-flow 409 message.
+
+    Dispatched (X-Dispatch=background) turns can't steer, so any non-fresh peer
+    is a conflict. Shared by the PTC and Flash handlers so the per-state wording
+    stays in one place.
+    """
+    if state == "stopping":
+        return f"Workflow {thread_id} is stopping; retry shortly."
+    if state == "compacting":
+        return f"Workflow {thread_id} is compacting its context; retry shortly."
+    return (
+        f"Workflow {thread_id} is still running; dispatched "
+        "follow-up could not be admitted."
+    )
+
+
 async def wait_or_steer(
     manager: BackgroundTaskManager,
     thread_id: str,
@@ -697,6 +714,24 @@ async def wait_or_steer(
                 f"Workflow {thread_id} is stopping. "
                 "Wait a moment, then retry your message."
             ),
+        )
+
+    # An in-progress compaction outlasted the admission wait. Must come BEFORE
+    # the steer fallback — steering mid-summarize corrupts the context rewrite,
+    # and a manual compaction has no turn to steer into. Structured detail
+    # (code) so the client can recognize this as a transient/retryable state and
+    # re-queue rather than surfacing a hard error banner; no thread_id in the
+    # user-facing message (it would leak into the UI on a client-state desync).
+    if state == "compacting":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "compacting",
+                "message": (
+                    "The assistant is compacting its context. "
+                    "Wait a moment, then resend your message."
+                ),
+            },
         )
 
     # state == "running" → steer the running workflow immediately.
@@ -745,6 +780,32 @@ async def handle_workflow_error(
     error occurred before the workspace was resolved.
     ``timezone_str`` is the resolved timezone; falls back to ``request.timezone``.
     """
+    # An HTTPException is a deliberate protocol response (e.g. a 409 admission
+    # conflict raised in-generator by ``wait_or_steer`` or the dispatched gate),
+    # not a workflow execution failure. Surface it to the client as an SSE
+    # error, but never persist it as a conversation error or call
+    # ``mark_failed``: this path runs with ``run_id=None``, the run_id guard is
+    # skipped when run_id is None, so marking failed would clobber a
+    # concurrently-running peer turn's status (defeating the guard).
+    if isinstance(e, HTTPException):
+        await release_burst_slot(user_id)
+        detail = e.detail
+        message = detail.get("message") if isinstance(detail, dict) else str(detail)
+        error_payload = {
+            "thread_id": thread_id,
+            "error": message,
+            "type": "workflow_error",
+            "error_type": "admission_conflict",
+            "error_class": type(e).__name__,
+        }
+        if isinstance(detail, dict) and detail.get("code"):
+            error_payload["code"] = detail["code"]
+        if handler:
+            yield handler._format_sse_event("error", error_payload)
+        else:
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+        return
+
     MAX_RETRIES = get_max_workflow_retries()
 
     # Release burst slot on error (setup errors before background task starts)
