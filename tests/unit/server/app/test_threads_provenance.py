@@ -151,19 +151,19 @@ class TestGetProvenanceBodies:
 
     @pytest.mark.asyncio
     async def test_redacted_inline_body_is_not_truncated(self, threads_client):
-        # Sibling to the test above, but redaction CHANGED the body's length:
-        # `byte_len` tracks the RAW pre-redaction size, while `body_inline` holds
-        # the (shorter) redacted bytes, and there is no spilled object. The complete
-        # redacted body is present and under the cap, so `truncated` is False — it
-        # keys off object_key + the cap, NOT a raw-vs-redacted length compare (which
-        # would mislabel a shortened-but-complete body as a partial head). The
-        # authoritative "not the raw bytes" signal is `verified=false`.
+        # A body that redaction shrank stays COMPLETE. `byte_len` tracks the stored
+        # (post-redaction) length, `body_inline` holds the whole redacted body, and
+        # there's no spilled object — so `truncated` is False even when the original
+        # was larger (this is the case that mislabeled when byte_len was the raw
+        # pre-redaction size: a body redacted from over the inline cap down to under
+        # it is whole, not a head). The "not the raw bytes" signal is `verified=false`.
         raw_body = b"api_key=sk-supersecretvalue-0123456789abcdef"
         raw_sha = hashlib.sha256(raw_body).hexdigest()
         redacted = "api_key=[REDACTED:API_KEY]"
         assert len(redacted.encode()) < len(raw_body)  # redaction shortened it
         rows = [_row(0, RESPONSE_0, "web_fetch", "https://x.test/a", raw_sha)]
-        bodies = {raw_sha: _body_meta(redacted, byte_len=len(raw_body))}
+        # byte_len = stored (redacted) length, as _body_item records it post-redaction.
+        bodies = {raw_sha: _body_meta(redacted)}
         with _patch_body_store(OWNER_ID, rows, bodies):
             resp = await threads_client.get(
                 f"/api/v1/threads/{THREAD_ID}/provenance/bodies"
@@ -171,6 +171,23 @@ class TestGetProvenanceBodies:
         rec = resp.json()["records"][0]
         assert rec["body_inline"] == redacted  # complete redacted body, not a head
         assert rec["truncated"] is False
+        assert rec["verified"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_bucket_head_is_truncated(self, threads_client):
+        # Over-cap body with no object store configured → only the inline head was
+        # kept (object_key None). The stored byte_len exceeds the inline slice, so
+        # truncated flips True without a spilled object — the head is incomplete.
+        head = "h" * 200
+        sha = "b" * 64
+        rows = [_row(0, RESPONSE_0, "web_fetch", "https://x.test/a", sha)]
+        bodies = {sha: _body_meta(head, byte_len=500_000, object_key=None)}
+        with _patch_body_store(OWNER_ID, rows, bodies):
+            resp = await threads_client.get(
+                f"/api/v1/threads/{THREAD_ID}/provenance/bodies"
+            )
+        rec = resp.json()["records"][0]
+        assert rec["truncated"] is True
         assert rec["verified"] is False
 
     @pytest.mark.asyncio

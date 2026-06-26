@@ -416,19 +416,23 @@ class ProvenanceMiddleware(AgentMiddleware):
         Returns None unless the source carries both a body and the
         ``result_sha256`` it hashes to, or if redaction itself fails (we never
         store an unredacted body). Pure — no DB; the batch is flushed once per turn.
+
+        ``byte_len`` is the length of the body we actually store (post-redaction),
+        NOT the raw pre-redaction ``result_size``. The read side derives truncation
+        as ``byte_len > len(inline)``, so a body that redaction shrank below the
+        inline cap is stored whole and reads back complete — the flag tracks what we
+        hold, not the original size (which the provenance record keeps as
+        ``result_size``).
         """
         if not source.result_body or not source.result_sha256:
             return None
         redacted = self._redact_body(source.result_body)
         if redacted is None:
             return None
-        size = source.result_size
-        if not isinstance(size, int) or size < 0:
-            size = len(redacted.encode("utf-8"))
         return (
             source.result_sha256,
             redacted,
-            size,
+            len(redacted.encode("utf-8")),
             "text/plain; charset=utf-8",
         )
 

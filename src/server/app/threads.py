@@ -1409,10 +1409,7 @@ async def get_provenance_bodies(
         rows = await get_provenance_for_thread(thread_id)
 
         from src.server.database.conversation import get_db_connection
-        from src.server.database.provenance_bodies import (
-            RESULT_BODY_MAX_BYTES,
-            fetch_result_bodies,
-        )
+        from src.server.database.provenance_bodies import fetch_result_bodies
 
         eligible = [row for row in rows if row.get("result_sha256")]
         capped = len(eligible) > limit
@@ -1429,10 +1426,12 @@ async def get_provenance_bodies(
                 continue
             body_inline = body["body_inline"] or ""
             byte_len = body["byte_len"]
-            # Incomplete iff the body spilled to an object or its true length
-            # exceeded the inline cap — NOT a raw-vs-inline length compare, which
-            # mislabels a redaction-shortened (but complete) body as truncated.
-            truncated = body["object_key"] is not None or byte_len > RESULT_BODY_MAX_BYTES
+            # byte_len is the length of the STORED (post-redaction) body, so the
+            # inline head is incomplete exactly when the full stored body is longer
+            # than what's inline — i.e. it spilled to an object, or a head was kept
+            # with no bucket to spill to. A body redaction shrank below the cap is
+            # stored whole (byte_len == len(inline)) and reads back complete.
+            truncated = byte_len > len(body_inline.encode("utf-8"))
             records.append(
                 {
                     "provenance_record_id": str(row["provenance_record_id"]),
@@ -1489,8 +1488,6 @@ async def get_provenance_record_body(
 
         from src.server.database.conversation import get_db_connection
         from src.server.database.provenance_bodies import (
-            FULL_BODY_READ_MAX_BYTES,
-            RESULT_BODY_MAX_BYTES,
             fetch_full_body,
             fetch_result_bodies,
         )
@@ -1504,21 +1501,19 @@ async def get_provenance_record_body(
             )
 
         byte_len = meta["byte_len"]
-        object_key = meta["object_key"]
         if full:
             body = await fetch_full_body(sha) or ""
-            # A full read is incomplete only if the spilled object exceeded the
-            # read cap, or the body was over the inline cap but never spilled (no
-            # bucket) so there was nothing more to read back. Keyed off byte_len +
-            # object_key, not a raw-vs-redacted length compare.
-            truncated = byte_len > FULL_BODY_READ_MAX_BYTES or (
-                object_key is None and byte_len > RESULT_BODY_MAX_BYTES
-            )
+            # byte_len is the full stored-body length; the read is incomplete
+            # exactly when we returned fewer bytes than that — the spilled object
+            # exceeded the read cap, or a head was kept with no bucket to spill to.
+            truncated = byte_len > len(body.encode("utf-8"))
         else:
             body = meta["body_inline"] or ""
-            # The inline head is incomplete iff the body spilled or exceeded the
-            # cap but couldn't spill — independent of redaction shortening it.
-            truncated = object_key is not None or byte_len > RESULT_BODY_MAX_BYTES
+            # The inline head is incomplete exactly when the full stored body is
+            # longer than the inline slice (spilled, or head kept with no bucket).
+            # byte_len tracks the stored (post-redaction) length, so a redaction-
+            # shrunk body that fits inline reads back complete.
+            truncated = byte_len > len(body.encode("utf-8"))
 
         return {
             "provenance_record_id": str(row["provenance_record_id"]),

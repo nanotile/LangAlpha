@@ -3267,9 +3267,20 @@ except OSError as e:
                 # Can't check status (e.g. sandbox restarted) — treat as
                 # finished to avoid zombie entries that permanently block the cap.
                 finished.append(cmd_id)
-        # Delete finished sessions
+        # Delete finished sessions. A finished command's MCP trace is normally
+        # harvested by the BashOutput that observes completion (provenance is
+        # attributed to that observation). A command that finished but was never
+        # observed before the cap forced eviction has no tool-call surface to
+        # attribute its trace to, so it's dropped — log it so the rare provenance
+        # gap is observable, not silent. (Faithful harvest-on-evict would need a
+        # deferred-trace channel keyed to the original launch; out of scope here.)
         for cmd_id in finished:
-            self._bg_trace_paths.pop(cmd_id, None)
+            dropped_trace = self._bg_trace_paths.pop(cmd_id, None)
+            if dropped_trace:
+                logger.info(
+                    "Evicting finished bg session with unharvested MCP trace",
+                    cmd_id=cmd_id,
+                )
             sid = self._bg_sessions.pop(cmd_id, None)
             if sid:
                 try:

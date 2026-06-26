@@ -551,10 +551,11 @@ async def test_host_path_sha_trusted_even_when_body_diverges():
     assert emitted[0]["result_sha256"] and items[0][0] == emitted[0]["result_sha256"]
 
 
-def test_body_item_coerces_nonint_result_size(middleware):
-    """A non-int result_size (only reachable on a malformed source) falls back to
-    the body's byte length rather than poisoning the BIGINT bind and aborting the
-    whole batch chunk."""
+def test_body_item_byte_len_ignores_result_size(middleware):
+    """byte_len is derived purely from the stored body's length; ``result_size``
+    is never read, so even a garbage value can't poison the BIGINT bind. The read
+    side keys truncation off ``byte_len > len(inline)``, which requires byte_len to
+    measure what we actually store — not the (possibly absent/malformed) raw size."""
     body = "hello body"
     src = SimpleNamespace(
         result_body=body,
@@ -564,6 +565,31 @@ def test_body_item_coerces_nonint_result_size(middleware):
     item = middleware._body_item(src)
     assert item is not None
     assert item[2] == len(body.encode("utf-8"))
+
+
+def test_body_item_byte_len_tracks_redacted_length():
+    """When redaction SHRINKS the body, byte_len records the post-redaction length
+    actually stored, not the larger raw result_size. This is the invariant behind
+    the read-side truncation flag: a body that was big pre-redaction but redacted
+    below the inline cap must read back as complete (byte_len <= len(inline)), not
+    be mislabeled a partial head."""
+    secret = "X" * 5000
+    body = f"head {secret} tail"
+    mw = ProvenanceMiddleware(
+        redactor=lambda s: s.replace(secret, "[REDACTED]") if s else s
+    )
+    src = SimpleNamespace(
+        result_body=body,
+        result_sha256=hashlib.sha256(body.encode()).hexdigest(),
+        result_size=len(body.encode("utf-8")),
+    )
+    item = mw._body_item(src)
+    assert item is not None
+    redacted = item[1]
+    assert secret not in redacted and "[REDACTED]" in redacted
+    # byte_len measures the stored (redacted) body, strictly less than the raw size.
+    assert item[2] == len(redacted.encode("utf-8"))
+    assert item[2] < len(body.encode("utf-8"))
 
 
 @pytest.mark.asyncio
