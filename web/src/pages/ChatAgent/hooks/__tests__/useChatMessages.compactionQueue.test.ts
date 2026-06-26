@@ -314,6 +314,49 @@ describe('useChatMessages – queued send during compaction', () => {
     });
   });
 
+  it('clears the parked queue + compacting flag on thread switch (no cross-thread replay)', async () => {
+    // A message parked during compaction on thread A must not survive a switch
+    // to thread B: the queue payload, the preview chip, and the compacting flag
+    // are all reset, so the flush effect can never replay A's message into B.
+    let tid: string | undefined = 'thread-A';
+    const { result, rerender } = renderHookWithProviders(() =>
+      useChatMessages('ws-test', tid),
+    );
+
+    act(() => {
+      result.current.setIsCompacting('summarize');
+    });
+    await act(async () => {
+      await result.current.handleSendMessage('parked on thread A');
+    });
+    expect(result.current.queuedSend).toBe('parked on thread A');
+
+    // Switch to thread B before compaction finishes.
+    await act(async () => {
+      tid = 'thread-B';
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(result.current.queuedSend).toBe(false);
+    expect(result.current.isCompacting).toBe(false);
+    expect(
+      result.current.messages.some(
+        (m) => m.role === 'user' && (m as { queued?: boolean }).queued,
+      ),
+    ).toBe(false);
+
+    // Proof of no cross-thread replay: a fresh compaction cycle on thread B
+    // must not flush thread A's stranded payload.
+    await act(async () => {
+      result.current.setIsCompacting('summarize');
+      result.current.setIsCompacting(false);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSendStream).not.toHaveBeenCalled();
+  });
+
   it('steers the queued message when a turn is still running at flush', async () => {
     // Auto Tier-2 summarize completes while the turn is STILL running → the
     // flush effect must steer into it (handleSendSteering), not start a fresh
@@ -350,6 +393,57 @@ describe('useChatMessages – queued send during compaction', () => {
     const lastUser = userMsgs[userMsgs.length - 1] as { steering?: boolean };
     expect(lastUser?.steering).toBe(true);
     expect(result.current.queuedSend).toBe(false);
+
+    firstHang.resolve({ disconnected: false });
+    await act(async () => {
+      await firstSend.catch(() => undefined);
+      await Promise.resolve();
+    });
+  });
+
+  it('preserves widget snapshots on the steered bubble after compaction flush', async () => {
+    // A message queued mid-compaction carries inline context (widget snapshots /
+    // chart selections). When the flush routes through steering (a turn is still
+    // running), those cards must survive on the rebuilt bubble — not get dropped
+    // because handleSendSteering only received message + attachmentMeta.
+    const firstHang = mockHangFirstStream('thread-q-3');
+    const { result } = renderHookWithProviders(() => useChatMessages('ws-test'));
+
+    let firstSend: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      firstSend = result.current.handleSendMessage('running turn');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(true));
+
+    const snapshot = { id: 'w1', title: 'Watchlist' } as unknown as never;
+    act(() => {
+      result.current.setIsCompacting('summarize');
+    });
+    await act(async () => {
+      await result.current.handleSendMessage('deferred with widget', false, null, null, {
+        widgetSnapshots: [snapshot],
+      });
+    });
+    expect(result.current.queuedSend).toBe('deferred with widget');
+
+    // Compaction finishes; turn still running → steer (the flush isLoading branch).
+    await act(async () => {
+      result.current.setIsCompacting(false);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockSendStream).toHaveBeenCalledTimes(2);
+    });
+    const userMsgs = result.current.messages.filter((m) => m.role === 'user');
+    const steered = userMsgs[userMsgs.length - 1] as {
+      steering?: boolean;
+      widgetSnapshots?: unknown[];
+    };
+    expect(steered.steering).toBe(true);
+    expect(steered.widgetSnapshots).toHaveLength(1);
 
     firstHang.resolve({ disconnected: false });
     await act(async () => {

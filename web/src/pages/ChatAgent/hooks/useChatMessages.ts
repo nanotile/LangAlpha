@@ -728,6 +728,13 @@ export function useChatMessages(
         setMessages([]);
         setThreadModels([]);
         setLastThreadModel(null);
+        // A compaction + a message parked during it belong to the thread we're
+        // leaving. Clear them so the isCompacting→false flush can never replay
+        // thread A's queued payload into thread B (and B doesn't inherit A's
+        // stale compacting indicator).
+        setQueuedSend(false);
+        queuedSendRef.current = null;
+        setIsCompacting(false);
         // Reset refs
         contentOrderCounterRef.current = 0;
         currentReasoningIdRef.current = null;
@@ -3948,9 +3955,11 @@ export function useChatMessages(
    * badge) and switch subsequent events to the standard stream processor so the
    * new turn renders normally.
    */
-  const handleSendSteering = async (message: string, planMode: boolean = false, additionalContext: Record<string, unknown>[] | null = null, attachmentMeta: Record<string, unknown>[] | null = null) => {
-    // Show user message in chat with steering indicator
-    const userMsg = createUserMessage(message, attachmentMeta as AttachmentMeta[] | null);
+  const handleSendSteering = async (message: string, planMode: boolean = false, additionalContext: Record<string, unknown>[] | null = null, attachmentMeta: Record<string, unknown>[] | null = null, { widgetSnapshots, chartSelections }: ModelOptions = {}) => {
+    // Show user message in chat with steering indicator. Preserve any inline
+    // context cards (widget snapshots / chart selections) so a message queued
+    // during compaction keeps them when the flush routes through steering.
+    const userMsg = createUserMessage(message, attachmentMeta as AttachmentMeta[] | null, widgetSnapshots ?? null, chartSelections ?? null);
     const userMessage: MessageRecord = { ...userMsg, steering: true };
     recentlySentTrackerRef.current.track(message.trim(), userMessage.timestamp, userMessage.id);
     setMessages((prev) => appendMessage(prev,userMessage));
@@ -4182,7 +4191,7 @@ export function useChatMessages(
 
     // If agent is already streaming, send as steering message
     if (isLoading) {
-      return handleSendSteering(message, planMode, additionalContext, attachmentMeta);
+      return handleSendSteering(message, planMode, additionalContext, attachmentMeta, { widgetSnapshots, chartSelections });
     }
 
     // Store planMode so HITL interrupt handler can access it
@@ -4457,7 +4466,7 @@ export function useChatMessages(
       setMessages((prev) => prev.filter((m) => m.id !== messageId));
     }
     if (isLoading) {
-      handleSendSteering(message, planMode, additionalContext, attachmentMeta);
+      handleSendSteering(message, planMode, additionalContext, attachmentMeta, modelOptions);
     } else {
       handleSendMessage(message, planMode, additionalContext, attachmentMeta, modelOptions);
     }

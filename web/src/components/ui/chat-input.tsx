@@ -1044,8 +1044,18 @@ const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput
     const actionCommands = slashCommands.filter((c) => c.type === 'action');
     if (actionCommands.length > 0) {
       actionCommands.forEach((c) => onAction?.(c));
+      // Fully reset the draft, same as a normal send — an action must not leave
+      // staged attachments / mentions / widget context behind for the next turn.
       setMessage('');
       setSlashCommands([]);
+      attachedFiles.forEach((f) => { if (f.preview) URL.revokeObjectURL(f.preview); });
+      setAttachedFiles([]);
+      setMentionedFiles([]);
+      if (widgetSnapshots.length > 0) {
+        ContextBus.clear();
+      }
+      setDeckFanned(false);
+      setShowAutocomplete(false);
       setShowSlashMenu(false);
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';

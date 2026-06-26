@@ -10,7 +10,7 @@
  *     does NOT fire onAction; the dispatch happens when the user sends.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, fireEvent, screen, waitFor } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ChatInput from '../chat-input';
@@ -130,5 +130,45 @@ describe('ChatInput — slash command menu', () => {
     expect(onAction.mock.calls[0][0].name).toBe('compact');
     expect(onAction.mock.calls[0][0].type).toBe('action');
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('clears the widget-context deck when an action command is sent', async () => {
+    // Sending /compact must not leave the user's staged draft context behind:
+    // the widget deck (and other draft state) clears, mirroring a normal send.
+    const { onAction } = renderInput();
+
+    const snapshot = {
+      widget_type: 'markets.chart',
+      widget_id: 'w1',
+      label: 'NVDA · 1d',
+      captured_at: '2026-01-01T00:00:00Z',
+      text: '<widget-context></widget-context>',
+      data: {},
+    };
+
+    const events: string[] = [];
+    const off = ContextBus.subscribe((e) => events.push(e.type));
+
+    await act(async () => {
+      ContextBus.attach(snapshot as never);
+    });
+
+    // Stage a /compact action pill alongside the staged widget context.
+    typeSlash('/comp');
+    await waitFor(() => expect(menuNames()).toContain('/compact'));
+    const compactItem = Array.from(
+      document.querySelectorAll('.mention-autocomplete-item'),
+    ).find((el) => el.querySelector('.slash-cmd-name')?.textContent === '/compact')!;
+    fireEvent.mouseDown(compactItem);
+    await waitFor(() =>
+      expect(document.querySelector('textarea')!.value).toContain('/compact'),
+    );
+
+    // Sending the action fires it AND clears the staged widget deck.
+    fireEvent.click(screen.getByLabelText('Send message'));
+    expect(onAction).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(events).toContain('clear'));
+
+    off();
   });
 });
