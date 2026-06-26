@@ -539,6 +539,22 @@ export function useChatMessages(
   // Widen this union when backend adds a new sandbox_state discriminator.
   const [workspaceStarting, setWorkspaceStarting] = useState<false | 'starting' | 'archived'>(false);
   const [isCompacting, setIsCompacting] = useState<string | false>(false);  // Context compaction in progress (summarize/offload)
+  // A message the user pressed Send on while the agent was compacting. Held
+  // until compaction finishes (mirrors the backend admission gate, which 409s
+  // a POST that arrives mid-compaction), then auto-sent: steered if a turn is
+  // still running, else a fresh turn. queuedSend (the preview text) drives the
+  // chip; queuedSendRef holds the full payload to replay.
+  const [queuedSend, setQueuedSend] = useState<string | false>(false);
+  const queuedSendRef = useRef<{
+    message: string;
+    planMode: boolean;
+    additionalContext: Record<string, unknown>[] | null;
+    attachmentMeta: Record<string, unknown>[] | null;
+    modelOptions: ModelOptions;
+    // id of the optimistic shimmer bubble shown while parked, so it can be
+    // removed on flush (before the real send re-adds it) or on stop.
+    messageId: string;
+  } | null>(null);
   const [messageError, setMessageError] = useState<string | StructuredError | null>(null);
   // Steering returned by the server (agent finished before consuming it)
   const [returnedSteering, setReturnedSteering] = useState<string | null>(null);
@@ -712,6 +728,13 @@ export function useChatMessages(
         setMessages([]);
         setThreadModels([]);
         setLastThreadModel(null);
+        // A compaction + a message parked during it belong to the thread we're
+        // leaving. Clear them so the isCompacting→false flush can never replay
+        // thread A's queued payload into thread B (and B doesn't inherit A's
+        // stale compacting indicator).
+        setQueuedSend(false);
+        queuedSendRef.current = null;
+        setIsCompacting(false);
         // Reset refs
         contentOrderCounterRef.current = 0;
         currentReasoningIdRef.current = null;
@@ -2805,6 +2828,16 @@ export function useChatMessages(
     }
   };
 
+  // Forget a message parked during compaction (clear ref + chip + optimistic shimmer bubble).
+  const dropQueuedSend = () => {
+    const queuedMsgId = queuedSendRef.current?.messageId;
+    queuedSendRef.current = null;
+    setQueuedSend(false);
+    if (queuedMsgId) {
+      setMessages((prev) => prev.filter((m) => m.id !== queuedMsgId));
+    }
+  };
+
   /**
    * Hard stop: terminates the current turn immediately while preserving state.
    * (a) aborts the main reader (stop feels instant); (b) finalizes the open
@@ -2843,6 +2876,11 @@ export function useChatMessages(
     // cleanupAfterStreamEnd resets them, but the stop path skips that cleanup.
     setWorkspaceStarting(false);
     setIsCompacting(false);
+    // Drop any message queued during compaction: the user just cancelled, so it
+    // must NOT auto-send when the isCompacting→false transition fires the flush
+    // effect. dropQueuedSend clears the ref synchronously (before the effect runs
+    // post-render) and removes its optimistic shimmer bubble.
+    dropQueuedSend();
     isStreamingRef.current = false;
     currentMessageRef.current = null;
 
@@ -2867,6 +2905,31 @@ export function useChatMessages(
         } catch {
           toast({ description: t('chat.stopFailed'), variant: 'destructive' });
         }
+      }
+    }
+  };
+
+  /**
+   * Stop an in-flight MANUAL compaction (/compact or /offload). Unlike
+   * stopWorkflow this is not a streaming-turn teardown — manual compaction
+   * registers no turn — so it only clears the local compaction state, drops any
+   * queued send, and asks the backend to cancel the in-flight compaction call
+   * (workflow_handler routes a run-less /cancel to cancel_compaction). The
+   * summarize/offload request then rejects; ChatView suppresses that error
+   * because the user initiated the stop.
+   */
+  const stopCompaction = async () => {
+    const tid = threadIdRef.current;
+    setIsCompacting(false);
+    // Drop a message queued during compaction so the isCompacting→false flush
+    // effect doesn't auto-send it after the user cancelled, and remove its
+    // optimistic shimmer bubble.
+    dropQueuedSend();
+    if (tid && tid !== '__default__') {
+      try {
+        await cancelWorkflow(tid);
+      } catch (err) {
+        console.warn('[stopCompaction] cancel failed:', err);
       }
     }
   };
@@ -3892,9 +3955,11 @@ export function useChatMessages(
    * badge) and switch subsequent events to the standard stream processor so the
    * new turn renders normally.
    */
-  const handleSendSteering = async (message: string, planMode: boolean = false, additionalContext: Record<string, unknown>[] | null = null, attachmentMeta: Record<string, unknown>[] | null = null) => {
-    // Show user message in chat with steering indicator
-    const userMsg = createUserMessage(message, attachmentMeta as AttachmentMeta[] | null);
+  const handleSendSteering = async (message: string, planMode: boolean = false, additionalContext: Record<string, unknown>[] | null = null, attachmentMeta: Record<string, unknown>[] | null = null, { widgetSnapshots, chartSelections }: ModelOptions = {}) => {
+    // Show user message in chat with steering indicator. Preserve any inline
+    // context cards (widget snapshots / chart selections) so a message queued
+    // during compaction keeps them when the flush routes through steering.
+    const userMsg = createUserMessage(message, attachmentMeta as AttachmentMeta[] | null, widgetSnapshots ?? null, chartSelections ?? null);
     const userMessage: MessageRecord = { ...userMsg, steering: true };
     recentlySentTrackerRef.current.track(message.trim(), userMessage.timestamp, userMessage.id);
     setMessages((prev) => appendMessage(prev,userMessage));
@@ -4088,9 +4153,45 @@ export function useChatMessages(
     // (clicking around never reorders; new threads surface via the new-id rule).
     bumpThreadNavOrder(workspaceId, threadIdRef.current);
 
+    // If the agent is compacting its context, hold this message and auto-send
+    // it once compaction finishes (mirrors the backend admission gate, which
+    // 409s a POST that arrives mid-compaction). Must come BEFORE the isLoading
+    // steering branch: during an auto Tier-2 summarize the turn is still
+    // running, so steering now would corrupt the in-flight context rewrite.
+    // Keying off isCompacting covers every compaction path uniformly — SSE
+    // auto-summarize plus manual /compact and /offload (both set isCompacting
+    // in ChatView).
+    if (isCompacting) {
+      // Show the parked message as a shimmer bubble (like a pending steering
+      // message) so the user sees what will send. Only the latest queued
+      // message is held, so replace any earlier optimistic bubble.
+      const prevQueuedId = queuedSendRef.current?.messageId;
+      const queuedMsg = createUserMessage(
+        message,
+        attachmentMeta as AttachmentMeta[] | null,
+        widgetSnapshots ?? null,
+        chartSelections ?? null,
+      );
+      const queuedMessage: MessageRecord = { ...queuedMsg, queued: true };
+      queuedSendRef.current = {
+        message,
+        planMode,
+        additionalContext,
+        attachmentMeta,
+        modelOptions: { model, reasoningEffort, fastMode, widgetSnapshots, chartSelections },
+        messageId: queuedMessage.id as string,
+      };
+      setMessages((prev) => {
+        const base = prevQueuedId ? prev.filter((m) => m.id !== prevQueuedId) : prev;
+        return appendMessage(base, queuedMessage);
+      });
+      setQueuedSend(message.trim() || '…');
+      return;
+    }
+
     // If agent is already streaming, send as steering message
     if (isLoading) {
-      return handleSendSteering(message, planMode, additionalContext, attachmentMeta);
+      return handleSendSteering(message, planMode, additionalContext, attachmentMeta, { widgetSnapshots, chartSelections });
     }
 
     // Store planMode so HITL interrupt handler can access it
@@ -4346,6 +4447,36 @@ export function useChatMessages(
           }
         }
       };
+
+  // Flush a message queued during compaction once it finishes. If a turn is
+  // still running (auto Tier-2 summarize), steer into it; otherwise start a
+  // fresh turn — the exact branch handleSendMessage would have taken had the
+  // message arrived now. queuedSendRef is cleared in stopWorkflow, so a queued
+  // message is never replayed into a turn the user just cancelled.
+  useEffect(() => {
+    if (isCompacting) return;
+    const queued = queuedSendRef.current;
+    if (!queued) return;
+    queuedSendRef.current = null;
+    setQueuedSend(false);
+    const { message, planMode, additionalContext, attachmentMeta, modelOptions, messageId } = queued;
+    // Drop the optimistic shimmer bubble; the send path re-adds the real one
+    // (steering shimmer if a turn is still running, else a normal user bubble).
+    if (messageId) {
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+    }
+    if (isLoading) {
+      handleSendSteering(message, planMode, additionalContext, attachmentMeta, modelOptions);
+    } else {
+      handleSendMessage(message, planMode, additionalContext, attachmentMeta, modelOptions);
+    }
+    // Fires on isCompacting transitions. isLoading and the send handlers are
+    // captured from the render where isCompacting went false — that render is
+    // the correct moment to decide steer-vs-fresh. Handlers are omitted from
+    // deps because the values they actually close over (workspaceId/threadId)
+    // don't change mid-compaction, so a stale closure here isn't possible.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCompacting]);
 
   /**
    * Resumes an interrupted workflow with an HITL response (approve or reject).
@@ -4997,6 +5128,7 @@ export function useChatMessages(
     workspaceStarting,
     isCompacting,
     setIsCompacting,
+    queuedSend,
     isLoadingHistory,
     isReconnecting,
     messageError,
@@ -5004,6 +5136,7 @@ export function useChatMessages(
     clearReturnedSteering: () => setReturnedSteering(null),
     handleSendMessage,
     stopWorkflow,
+    stopCompaction,
     pendingInterrupt,
     pendingRejection,
     handleApproveInterrupt,

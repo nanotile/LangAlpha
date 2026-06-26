@@ -663,6 +663,41 @@ def build_graph_config(
     return graph_config
 
 
+# Structured codes carried by every in-generator admission-conflict 409
+# (``admission_conflict_detail`` and ``wait_or_steer``). ``handle_workflow_error``
+# keys its skip-persist/skip-mark_failed path on these so a non-admission 409
+# can't be mistaken for one. ``request_cancelled`` (from the cancellation
+# wrapper) is included defensively though it does not currently reach this path.
+ADMISSION_CONFLICT_CODES = {"stopping", "compacting", "running", "request_cancelled"}
+
+
+def admission_conflict_detail(thread_id: str, state: str) -> dict:
+    """Map a non-fresh admission state to the dispatched-flow 409 detail.
+
+    Dispatched (X-Dispatch=background) turns can't steer, so any non-fresh peer
+    is a conflict. Returns a structured ``{"code", "message"}`` dict so
+    ``handle_workflow_error`` can tag the SSE error with the code and the client
+    can recognize the transient state; ``thread_id`` is kept out of the
+    user-facing message so it can't leak into the UI on a client-state desync.
+    Shared by the PTC and Flash handlers so the per-state wording lives in one
+    place.
+    """
+    if state == "stopping":
+        return {
+            "code": "stopping",
+            "message": "The workflow is stopping. Wait a moment, then retry.",
+        }
+    if state == "compacting":
+        return {
+            "code": "compacting",
+            "message": "The assistant is compacting its context. Wait a moment, then retry.",
+        }
+    return {
+        "code": "running",
+        "message": "The workflow is still running; the follow-up could not be admitted.",
+    }
+
+
 async def wait_or_steer(
     manager: BackgroundTaskManager,
     thread_id: str,
@@ -693,10 +728,31 @@ async def wait_or_steer(
     if state == "stopping":
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"Workflow {thread_id} is stopping. "
-                "Wait a moment, then retry your message."
-            ),
+            detail={
+                "code": "stopping",
+                "message": (
+                    "The workflow is stopping. "
+                    "Wait a moment, then retry your message."
+                ),
+            },
+        )
+
+    # An in-progress compaction outlasted the admission wait. Must come BEFORE
+    # the steer fallback — steering mid-summarize corrupts the context rewrite,
+    # and a manual compaction has no turn to steer into. Structured detail
+    # (code) so the client can recognize this as a transient/retryable state and
+    # re-queue rather than surfacing a hard error banner; no thread_id in the
+    # user-facing message (it would leak into the UI on a client-state desync).
+    if state == "compacting":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "compacting",
+                "message": (
+                    "The assistant is compacting its context. "
+                    "Wait a moment, then resend your message."
+                ),
+            },
         )
 
     # state == "running" → steer the running workflow immediately.
@@ -714,10 +770,13 @@ async def wait_or_steer(
     # Fallback: raise 409 if steering failed
     raise HTTPException(
         status_code=409,
-        detail=(
-            f"Workflow {thread_id} is still running. "
-            "Wait a moment, or use /reconnect to continue streaming, or /cancel to stop it."
-        ),
+        detail={
+            "code": "running",
+            "message": (
+                "The workflow is still running. Wait a moment, then retry — "
+                "or use /reconnect to continue streaming, or /cancel to stop it."
+            ),
+        },
     )
 
 
@@ -745,6 +804,41 @@ async def handle_workflow_error(
     error occurred before the workspace was resolved.
     ``timezone_str`` is the resolved timezone; falls back to ``request.timezone``.
     """
+    # An admission-conflict 409 is a deliberate protocol response (raised
+    # in-generator by ``wait_or_steer`` or the dispatched gate), not a workflow
+    # execution failure. Surface it to the client as an SSE error, but never
+    # persist it as a conversation error or call ``mark_failed``: this path runs
+    # with ``run_id=None``, the run_id guard is skipped when run_id is None, so
+    # marking failed would clobber a concurrently-running peer turn's status
+    # (defeating the guard). Keyed on the structured admission CODE, not the bare
+    # 409 status: every admission 409 now carries ``detail={"code", ...}`` (see
+    # ``admission_conflict_detail`` / ``wait_or_steer``), so any other
+    # HTTPException — a 503, or even a future non-admission 409 from middleware —
+    # falls through to the persist + mark_failed + classify path below.
+    if (
+        isinstance(e, HTTPException)
+        and e.status_code == 409
+        and isinstance(e.detail, dict)
+        and e.detail.get("code") in ADMISSION_CONFLICT_CODES
+    ):
+        await release_burst_slot(user_id)
+        # The guard above already proved e.detail is a dict whose "code" is in
+        # ADMISSION_CONFLICT_CODES (truthy), so no re-checking is needed here.
+        detail = e.detail
+        error_payload = {
+            "thread_id": thread_id,
+            "error": detail.get("message"),
+            "type": "workflow_error",
+            "error_type": "admission_conflict",
+            "error_class": type(e).__name__,
+            "code": detail["code"],
+        }
+        if handler:
+            yield handler._format_sse_event("error", error_payload)
+        else:
+            yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+        return
+
     MAX_RETRIES = get_max_workflow_retries()
 
     # Release burst slot on error (setup errors before background task starts)

@@ -217,6 +217,57 @@ class TestCompactMessagesErrorPath:
             )
 
 
+class TestCompactMessagesTimeout:
+    """The compaction LLM call carries its own wall-clock budget so a hung
+    summarize fails naturally (raising -> HTTP 500, releasing the admission
+    guard) instead of blocking the thread forever. The timeout lives on the
+    call, not on a flat admission-side 409 clock."""
+
+    def _patch_offload_stubs(self, monkeypatch, compact_module):
+        async def _passthrough(backend, messages):
+            return messages
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(compact_module, "aoffload_base64_content", _passthrough)
+        monkeypatch.setattr(compact_module, "aoffload_to_backend", _noop)
+        monkeypatch.setattr(compact_module, "aoffload_truncated_args", _noop)
+
+    @pytest.mark.asyncio
+    async def test_raises_timeout_when_llm_call_exceeds_budget(self, monkeypatch):
+        import asyncio
+
+        from ptc_agent.agent.middleware.compaction import compact as compact_module
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        fake_llm = MagicMock()
+        fake_llm.ainvoke = _hang
+
+        monkeypatch.setattr(
+            compact_module, "get_llm_by_type", lambda model_name: fake_llm
+        )
+        # Tiny budget so the hung call trips the wait_for almost immediately.
+        monkeypatch.setattr(compact_module, "get_compaction_timeout", lambda: 0.01)
+        self._patch_offload_stubs(monkeypatch, compact_module)
+
+        messages = [
+            HumanMessage(content="a", id="1"),
+            HumanMessage(content="b", id="2"),
+            HumanMessage(content="c", id="3"),
+        ]
+
+        with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+            await compact_module.compact_messages(
+                messages=messages,
+                keep_messages=1,
+                model_name="gpt-4o",
+                backend=None,
+            )
+
+
 class TestAcreateSummaryWindowClose:
     """If CancelledError propagated past _acreate_summary without emitting a
     terminal signal, a cancelled stream would persist a naked "summarize
@@ -302,6 +353,44 @@ class TestAcreateSummaryWindowClose:
         )
 
         assert "upstream down" in result
+        assert ("summarize", "start") in calls
+        assert ("summarize", "error") in calls
+
+    @pytest.mark.asyncio
+    async def test_timeout_emits_error_and_returns_fallback(self, monkeypatch):
+        """A hung auto summarize must self-terminate on the compaction budget,
+        then close the window (error signal) and return a fallback string —
+        same shape as any other LLM failure, so the guard is released."""
+        import asyncio
+
+        mw = self._make_middleware()
+
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        mw.model.ainvoke = _hang
+
+        calls: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            mw,
+            "_emit_context_signal",
+            lambda a, s, **k: calls.append((a, s)),
+        )
+
+        from ptc_agent.agent.middleware.compaction import middleware as mw_mod
+
+        async def _passthrough(backend, messages):
+            return messages
+
+        monkeypatch.setattr(mw_mod, "aoffload_base64_content", _passthrough)
+        # Tiny budget so the hung call trips the wait_for almost immediately.
+        monkeypatch.setattr(mw_mod, "get_compaction_timeout", lambda: 0.01)
+
+        result = await mw._acreate_summary(
+            [HumanMessage(content="hi", id="h")], original_count=1
+        )
+
+        assert result.startswith("Error generating summary")
         assert ("summarize", "start") in calls
         assert ("summarize", "error") in calls
 
