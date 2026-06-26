@@ -74,6 +74,7 @@ class BackgroundExecutionConfig(BaseModel):
     )
     admission_compaction_wait_timeout: float = Field(
         default=180.0,
+        gt=0,
         description=(
             "Max seconds a new turn blocks at admission for an in-progress "
             "compaction (auto Tier-2 summarize or manual /compact|/offload) to "
@@ -91,6 +92,7 @@ class BackgroundExecutionConfig(BaseModel):
     )
     compaction_timeout: float = Field(
         default=180.0,
+        gt=0,
         description=(
             "Wall-clock budget (seconds) for a single compaction LLM call "
             "(auto Tier-2 summarize and manual /compact). The call is wrapped "

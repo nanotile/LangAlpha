@@ -1037,6 +1037,66 @@ class TestHandleWorkflowErrorHTTPException:
         persistence_service.persist_error.assert_not_awaited()
         tracker.mark_failed.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_non_409_http_exception_is_persisted_and_marked_failed(self):
+        """The skip path is scoped to the 409 admission/cancellation contract.
+        A non-409 HTTPException (e.g. a 503 raised because the agent isn't
+        initialized) is a genuine failure: it must flow through the normal
+        failure path — persist the error, mark the turn failed, and be labeled
+        as a real workflow error, NOT mislabeled as an admission conflict."""
+        from fastapi import HTTPException
+
+        from src.server.handlers.chat._common import handle_workflow_error
+
+        exc = HTTPException(status_code=503, detail="backend not ready")
+
+        persistence_service = AsyncMock()
+        tracker = AsyncMock()
+        handler = MagicMock()
+        handler.get_tool_usage = MagicMock(return_value=None)
+        handler.get_sse_events = MagicMock(return_value=None)
+        handler._format_sse_event = MagicMock(
+            side_effect=lambda ev, data: f"event: {ev}\ndata: {data}\n\n"
+        )
+        request = MagicMock()
+        request.workspace_id = None
+        request.locale = None
+        request.timezone = None
+
+        with (
+            patch(
+                "src.server.handlers.chat._common.WorkflowTracker"
+            ) as mock_tracker_cls,
+            patch(
+                "src.server.handlers.chat._common.release_burst_slot",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tracker_cls.get_instance.return_value = tracker
+            events = [
+                ev
+                async for ev in handle_workflow_error(
+                    exc,
+                    thread_id="t-1",
+                    user_id="u-1",
+                    workspace_id="w-1",
+                    handler=handler,
+                    token_callback=None,
+                    persistence_service=persistence_service,
+                    start_time=0.0,
+                    request=request,
+                    is_byok=False,
+                    msg_type="ptc",
+                    log_prefix="PTC_TEST",
+                )
+            ]
+
+        # A genuine 503 is persisted and marked failed (real failure path)...
+        persistence_service.persist_error.assert_awaited()
+        tracker.mark_failed.assert_awaited()
+        # ...and is never mislabeled as a transient admission conflict.
+        assert not any("admission_conflict" in ev for ev in events)
+
 
 # ---------------------------------------------------------------------------
 # serialize_context_metadata

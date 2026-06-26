@@ -833,6 +833,9 @@ class WorkflowStreamHandler:
                 except Exception:
                     pass
                 self._compaction_active = False
+            # Clear any stale windows alongside the active flag so a reused
+            # handler re-arms the guard (was_empty stays accurate) on reopen.
+            self._compaction_windows.clear()
             if timeout_warning_sent:
                 _stream_span.set_attribute("timeout_warning", True)
             _stream_span.end()

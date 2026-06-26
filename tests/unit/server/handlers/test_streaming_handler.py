@@ -1216,3 +1216,29 @@ class TestCompactionWindowGuard:
                     pass
         manager.end_compaction.assert_called_once_with("t-finally")
         assert handler._compaction_active is False
+
+    @pytest.mark.asyncio
+    async def test_outer_finally_clears_windows_so_guard_is_reacquirable(self):
+        """The safety net must also clear _compaction_windows, not just
+        _compaction_active. A stale window left behind would make a later
+        _open_compaction_window see was_empty=False and skip begin_compaction,
+        silently failing to re-arm the guard if the handler is ever reused."""
+        handler = self._make_handler(thread_id="t-reopen")
+        manager = MagicMock()
+        manager.begin_compaction.return_value = True
+        graph = MagicMock()
+        graph.astream.side_effect = RuntimeError("graph blew up")
+        with patch(self.BTM, return_value=manager):
+            handler._open_compaction_window(())
+            with pytest.raises(RuntimeError):
+                async for _ in handler.stream_workflow(
+                    graph, {}, {"configurable": {}}
+                ):
+                    pass
+            # The safety net left no stale windows behind...
+            assert handler._compaction_windows == set()
+            manager.begin_compaction.reset_mock()
+            # ...so a subsequent open re-arms the guard from scratch.
+            handler._open_compaction_window(())
+        manager.begin_compaction.assert_called_once_with("t-reopen")
+        assert handler._compaction_active is True

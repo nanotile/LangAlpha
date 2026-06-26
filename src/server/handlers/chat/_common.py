@@ -780,14 +780,16 @@ async def handle_workflow_error(
     error occurred before the workspace was resolved.
     ``timezone_str`` is the resolved timezone; falls back to ``request.timezone``.
     """
-    # An HTTPException is a deliberate protocol response (e.g. a 409 admission
-    # conflict raised in-generator by ``wait_or_steer`` or the dispatched gate),
-    # not a workflow execution failure. Surface it to the client as an SSE
-    # error, but never persist it as a conversation error or call
-    # ``mark_failed``: this path runs with ``run_id=None``, the run_id guard is
-    # skipped when run_id is None, so marking failed would clobber a
-    # concurrently-running peer turn's status (defeating the guard).
-    if isinstance(e, HTTPException):
+    # A 409 HTTPException is a deliberate admission/steering protocol response
+    # (raised in-generator by ``wait_or_steer`` or the dispatched gate), not a
+    # workflow execution failure. Surface it to the client as an SSE error, but
+    # never persist it as a conversation error or call ``mark_failed``: this
+    # path runs with ``run_id=None``, the run_id guard is skipped when run_id is
+    # None, so marking failed would clobber a concurrently-running peer turn's
+    # status (defeating the guard). Scoped to 409 only — any other HTTPException
+    # (e.g. a 503 because the agent isn't initialized) is a genuine failure and
+    # must fall through to the persist + mark_failed + classify path below.
+    if isinstance(e, HTTPException) and e.status_code == 409:
         await release_burst_slot(user_id)
         detail = e.detail
         message = detail.get("message") if isinstance(detail, dict) else str(detail)
