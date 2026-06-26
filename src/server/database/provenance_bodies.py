@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Iterable
 
 from psycopg.rows import dict_row
 
@@ -116,7 +117,9 @@ def _build_body_row(
     )
 
 
-async def store_result_bodies(items) -> None:
+async def store_result_bodies(
+    items: Iterable[tuple[str, str, int, str | None]],
+) -> None:
     """Batch-persist content-addressed result bodies (best-effort, never raises).
 
     ``items`` is an iterable of ``(sha256, body, true_byte_len, content_type)``.
@@ -152,12 +155,23 @@ async def store_result_bodies(items) -> None:
             # event loop — pure encode + NUL-scan, no I/O — so we don't pay a
             # thread-pool hop per row. Only an oversize body reaches boto3 (the
             # spill branch in _build_body_row); offload just that off the loop.
-            if len(body.encode("utf-8")) > RESULT_BODY_MAX_BYTES:
-                row = await asyncio.to_thread(
-                    _build_body_row, sha256, body, true_byte_len, content_type
+            try:
+                if len(body.encode("utf-8")) > RESULT_BODY_MAX_BYTES:
+                    row = await asyncio.to_thread(
+                        _build_body_row, sha256, body, true_byte_len, content_type
+                    )
+                else:
+                    row = _build_body_row(sha256, body, true_byte_len, content_type)
+            except Exception as e:
+                # Isolate per-item build failures so one bad body can't drop the
+                # rest of the turn's. _build_body_row is already defensive
+                # (upload_bytes returns False, never raises), so this is
+                # belt-and-suspenders for the module's "best-effort" contract.
+                logger.warning(
+                    "[provenance] skipped one result body (build failed)",
+                    extra={"result_sha256": sha256, "error": str(e)},
                 )
-            else:
-                row = _build_body_row(sha256, body, true_byte_len, content_type)
+                continue
             if row is not None:
                 rows.append(row)
                 if row[2]:
@@ -351,6 +365,12 @@ async def sweep_orphan_bodies(grace_days: int = _GC_GRACE_DAYS) -> int:
             # gone; a concurrent reuse may have re-inserted one with the same
             # content-addressed object key, and deleting that object would strand
             # the live row's body. Only the survivors get their objects reclaimed.
+            # Residual (accepted): a reuse that uploaded provenance/{sha} but hasn't
+            # committed its insert when this recheck runs is still seen as absent,
+            # so its object can be deleted out from under the about-to-commit row.
+            # That row then degrades to head-only on full=true (inline head still
+            # served) and self-heals on the next reuse, which re-uploads
+            # unconditionally — so it's a transient degrade, never data loss.
             spilled = [(sha, key) for sha, key in rows if key]
             if spilled:
                 async with conn.cursor() as check_cur:

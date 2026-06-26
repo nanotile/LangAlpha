@@ -402,7 +402,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Application shutdown started...")
 
-    # 0. Shutdown ProvenanceGCService
+    # 0.1. Shutdown ProvenanceGCService
     try:
         from src.server.services.provenance_gc import ProvenanceGCService
 
@@ -410,7 +410,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Error shutting down ProvenanceGCService: {e}")
 
-    # 0. Shutdown NewsRefreshService
+    # 0.2. Shutdown NewsRefreshService
     try:
         from src.server.services.news_refresh_service import NewsRefreshService
 
@@ -418,7 +418,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Error shutting down NewsRefreshService: {e}")
 
-    # 0. Shutdown MarketInsightService
+    # 0.3. Shutdown MarketInsightService
     try:
         from src.server.services.insight_service import InsightService
 

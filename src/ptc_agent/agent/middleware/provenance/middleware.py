@@ -108,6 +108,11 @@ _MARKET_DATA_TOOLS = (
 _SHA_MAX_CHARS = 128
 _IDENT_PART_MAX_CHARS = 256
 _MAX_TRACE_ENTRIES = 200
+# Cap on the agent-controlled trace timestamp. A well-formed ISO-8601 value is
+# ~25-35 chars; anything longer (or non-string) is a poisoned/buggy trace, so it
+# falls back to now(). Bounds the one trace field that otherwise rode the SSE
+# event unclamped (the DB writer already coerces a bad value to NULL).
+_TIMESTAMP_MAX_CHARS = 64
 
 # A tool result whose content begins with one of these is treated as failed, so
 # we don't record a "source accessed" for data the tool never actually returned.
@@ -681,11 +686,19 @@ class ProvenanceMiddleware(AgentMiddleware):
             # poisoned trace can't bloat the identifier/snippet/sha columns.
             server = str(server)[:_IDENT_PART_MAX_CHARS]
             tool = str(tool)[:_IDENT_PART_MAX_CHARS]
+            # Clamp the agent-controlled timestamp like the other trace fields:
+            # a non-string or oversized value would otherwise ride the SSE event.
+            raw_ts = entry.get("timestamp")
+            timestamp = (
+                raw_ts[:_TIMESTAMP_MAX_CHARS]
+                if isinstance(raw_ts, str) and raw_ts
+                else _now_iso()
+            )
             yield ProvenanceSource(
                 record_id=_new_id(),
                 source_type="mcp_tool",
                 identifier=f"{server}:{tool}",
-                timestamp=entry.get("timestamp") or _now_iso(),
+                timestamp=timestamp,
                 provider=f"mcp:{server}",
                 tool_call_id=tool_call_id,
                 # Keep the readable redacted args alongside the legacy hash; the

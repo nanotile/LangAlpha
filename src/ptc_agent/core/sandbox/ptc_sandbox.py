@@ -2711,6 +2711,12 @@ except OSError as e:
                 retry_policy=RetryPolicy.SAFE,
             )
             trace_bytes = int((getattr(size_res, "stdout", "") or "").strip() or 0)
+            if trace_bytes == 0:
+                # No trace written — the common case for a bash command that
+                # imported no MCP wrappers (git/npm/ls/...). The file was never
+                # created, so skip BOTH the read and the rm below (nothing to
+                # delete): saves two sandbox round-trips on every non-MCP bash run.
+                return records
             if trace_bytes > _MCP_TRACE_READ_MAX_BYTES:
                 logger.warning(
                     "MCP trace file over read cap; skipping",
@@ -3281,6 +3287,17 @@ except OSError as e:
                     "Evicting finished bg session with unharvested MCP trace",
                     cmd_id=cmd_id,
                 )
+                # The pop above drops the last host-side reference to this trace,
+                # so delete the JSONL now — otherwise it leaks on the sandbox
+                # until teardown (no later path knows the filename to reap it).
+                try:
+                    await self._runtime_call(
+                        self.runtime.exec,
+                        f"rm -f {shlex.quote(dropped_trace)}",
+                        retry_policy=RetryPolicy.SAFE,
+                    )
+                except Exception:
+                    logger.debug("Evict bg trace cleanup failed", path=dropped_trace)
             sid = self._bg_sessions.pop(cmd_id, None)
             if sid:
                 try:
@@ -3768,8 +3785,10 @@ except OSError as e:
         foreground and background bash paths so the two can't drift in how they
         build PYTHONPATH or quote the trace path.
         """
-        assert self.runtime is not None
-        sandbox_root = await self.runtime.fetch_working_dir()
+        # Use the cached working dir (set on create/reconnect via
+        # fetch_working_dir, and used by normalize_path on this same bash path) so
+        # wrapping a command doesn't add a Daytona round-trip per bash invocation.
+        sandbox_root = self._work_dir
         internal_dir = f"{sandbox_root}/_internal"
         pythonpath = f"{sandbox_root}:{internal_dir}/src:{internal_dir}"
         trace_path = f"{sandbox_root}/.system/trace/{bash_id}_{uuid.uuid4().hex}.jsonl"

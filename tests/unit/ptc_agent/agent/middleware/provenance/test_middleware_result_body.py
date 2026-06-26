@@ -620,3 +620,14 @@ async def test_fanout_bodies_flushed_in_one_batch():
     stored_shas = {item[0] for item in items}
     assert stored_shas == {e["result_sha256"] for e in emitted}
     assert len(stored_shas) == 2
+
+
+def test_result_body_cap_matches_across_layers():
+    """The body cap is re-declared (not imported) in the server store to keep that
+    module off the agent import graph, so the two copies can drift silently. Pin
+    them equal here: drift would split MCP-body verification from truncation."""
+    from src.server.database.provenance_bodies import (
+        RESULT_BODY_MAX_BYTES as SERVER_CAP,
+    )
+
+    assert RESULT_BODY_MAX_BYTES == SERVER_CAP

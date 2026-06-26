@@ -38,13 +38,14 @@ _WRITER_PATH = (
 # (sha, body, byte_len, content_type) tuples.
 _STORE_PATH = "src.server.database.provenance_bodies.store_result_bodies"
 
-# An armed redactor, exactly like production: real secret VALUES configured.
-# None of these strings appears in the clean SEC / market payloads below, so a
-# correct redactor must leave those bodies byte-identical to their canonical form.
+# An armed redactor, exactly like production: secret VALUES configured. These are
+# deliberately obvious non-secrets (just long enough to clear the redactor's >=8
+# char gate) so they don't trip secret scanners; none appears in the clean SEC /
+# market payloads below, so a correct redactor leaves those bodies byte-identical.
 _VAULT_SECRETS = {
-    "FMP_API_KEY": "fmpk_live_9a8b7c6d5e4f3g2h1i0j",
-    "OPENAI_API_KEY": "sk-proj-AAAABBBBCCCCDDDDEEEE",
-    "GITHUB_TOKEN": "ghp_ZZZZ1111YYYY2222XXXX3333",
+    "FMP_API_KEY": "fake-fmp-key-for-tests-only",
+    "OPENAI_API_KEY": "fake-openai-key-for-tests-only",
+    "GITHUB_TOKEN": "fake-github-token-for-tests-only",
 }
 
 
