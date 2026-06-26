@@ -14,6 +14,7 @@ from the LangGraph namespace.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Iterator
@@ -30,6 +31,10 @@ from ptc_agent.agent.provenance import (
     fingerprint_result,
     hash_args,
     redact_args,
+)
+from ptc_agent.agent.provenance.types import (
+    RESULT_BODY_MAX_BYTES,
+    _canonicalize,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +118,16 @@ _MAX_TRACE_ENTRIES = 200
 _ERROR_CONTENT_PREFIXES = ("[error]", "error:", "failed to ", "exception:", "exception ")
 
 
+def _canonical_body(value: Any) -> str:
+    """Full canonical string of a fingerprinted value — the raw per-access body.
+
+    Must equal the exact string ``fingerprint_result`` hashes for ``value`` so
+    the stored body is hash-consistent with ``result_sha256`` (it is the full
+    body, NOT the snippet-truncated form).
+    """
+    return _canonicalize(value)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -158,8 +173,16 @@ def _is_agent_infra_path(path: str) -> bool:
     )
 
 
+# Tools whose artifact carries an in-sandbox ``mcp_trace``. All run agent code
+# in the sandbox: ExecuteCode directly, Bash when it runs a script importing the
+# MCP wrappers, and BashOutput which surfaces a backgrounded script's trace when
+# the command finishes. They share the trace extractor, the error-result
+# exemption, and the mcp_trace strip.
+_MCP_TRACE_TOOLS = ("ExecuteCode", "Bash", "BashOutput")
+
+
 def _strip_mcp_trace(result: Any) -> None:
-    """Drop the provenance-only mcp_trace key from an ExecuteCode artifact.
+    """Drop the provenance-only mcp_trace key from an ExecuteCode/Bash artifact.
 
     Mutates the ToolMessage artifact in place so the raw in-sandbox trace never
     propagates outward onto tool_call_result or into persisted sse_events.
@@ -172,6 +195,21 @@ def _strip_mcp_trace(result: Any) -> None:
 def _truncate(value: Any, limit: int) -> Any:
     """Clamp a string field to ``limit`` chars; pass non-strings through."""
     return value[:limit] if isinstance(value, str) else value
+
+
+def _clamp_body_bytes(value: Any, limit: int) -> str | None:
+    """Byte-clamp an untrusted trace body; pass None / non-strings to None.
+
+    Re-clamps the agent-authored ``result_body`` host-side (the sandbox already
+    byte-caps it) on a byte boundary with ``errors="ignore"`` so a multibyte
+    split is dropped, mirroring the sandbox's decode.
+    """
+    if not isinstance(value, str):
+        return None
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
 
 
 def _is_error_result(result: Any) -> bool:
@@ -226,6 +264,12 @@ class ProvenanceMiddleware(AgentMiddleware):
             # consumed) and Grep (content matched) are.
             "Grep": self._extract_file_read,
             "ExecuteCode": self._extract_execute_code,
+            # Bash shares the trace extractor: a script it runs (e.g. `python
+            # analysis.py`) writes the same mcp_trace, surfaced on the artifact.
+            "Bash": self._extract_execute_code,
+            # BashOutput surfaces a backgrounded script's mcp_trace on the status
+            # read that observes completion — same artifact contract as Bash.
+            "BashOutput": self._extract_execute_code,
             **dict.fromkeys(_MARKET_DATA_TOOLS, self._extract_market_data),
         }
 
@@ -244,10 +288,11 @@ class ProvenanceMiddleware(AgentMiddleware):
             if extractor is None:
                 return result
 
-            # Don't attest a source the tool never actually returned. ExecuteCode
-            # is exempt: its code may "error" while individual in-sandbox MCP
-            # calls succeeded, and those trace entries are guarded per-entry.
-            if tool_name != "ExecuteCode" and _is_error_result(result):
+            # Don't attest a source the tool never actually returned. The
+            # MCP-trace tools (ExecuteCode/Bash) are exempt: the code/command may
+            # "error" while individual in-sandbox MCP calls succeeded, and those
+            # trace entries are guarded per-entry.
+            if tool_name not in _MCP_TRACE_TOOLS and _is_error_result(result):
                 return result
 
             try:
@@ -259,7 +304,7 @@ class ProvenanceMiddleware(AgentMiddleware):
                 # lands in persisted sse_events. In a finally so it runs even if
                 # the extractor raises — the raw-args-never-persisted property must
                 # not depend on extraction succeeding.
-                if tool_name == "ExecuteCode":
+                if tool_name in _MCP_TRACE_TOOLS:
                     _strip_mcp_trace(result)
 
             if not sources:
@@ -269,7 +314,9 @@ class ProvenanceMiddleware(AgentMiddleware):
             if writer is None:
                 return result
 
+            body_batch: list[tuple] = []
             for source in sources:
+                self._verify_source_sha(source)
                 source.result_snippet = self._redact_snippet(source.result_snippet)
                 try:
                     writer(build_provenance_event(source))
@@ -279,6 +326,19 @@ class ProvenanceMiddleware(AgentMiddleware):
                         tool_name,
                         exc_info=True,
                     )
+                item = self._body_item(source)
+                if item is not None:
+                    body_batch.append(item)
+            # One batched write per TOOL CALL, after this call's emits (best-effort,
+            # never on the SSE event): collapses this call's per-source fan-out —
+            # web_search's N URLs, the market fan-out's duplicate shas,
+            # execute_code's N mcp_trace entries — into a single chunked upsert, so
+            # a slow or failed body write can't delay or break the provenance
+            # events. Per call, not per turn: awrap_tool_call wraps one tool call,
+            # so a turn with many source-bearing calls does one flush each. A
+            # turn-level sink would batch further but needs cross-call buffering in
+            # shared middleware state (concurrency-sensitive) — deferred.
+            await self._flush_bodies(body_batch)
         except Exception:
             # WARNING, not DEBUG: a broken extractor silently degrades the
             # feature to "no provenance"; surface it so it's observable.
@@ -298,6 +358,99 @@ class ProvenanceMiddleware(AgentMiddleware):
         except Exception:
             logger.debug("[PROVENANCE] snippet redaction failed; dropping snippet")
             return None
+
+    def _redact_body(self, body: str | None) -> str | None:
+        """Scrub secrets from a FULL body — pure redaction, NO truncation.
+
+        Uses the same deterministic ``self._redactor`` as ``_redact_snippet``
+        (which only redacts; the snippet is truncated upstream at fingerprint
+        time), so the body is redacted over its full length while staying
+        deterministic for the shared content-addressed store's dedup. Returns
+        None if redaction itself fails (don't store an unredacted body).
+        """
+        if body is None:
+            return None
+        if self._redactor is None:
+            return body
+        try:
+            return self._redactor(body)
+        except Exception:
+            logger.debug("[PROVENANCE] body redaction failed; dropping body")
+            return None
+
+    def _verify_source_sha(self, source: ProvenanceSource) -> None:
+        """Drop an agent-authored content-address the captured body doesn't hash to.
+
+        For ``mcp_tool`` sources both ``result_sha256`` and ``result_body`` come from
+        the in-sandbox trace, which the agent's own ``execute_code`` can forge (it
+        shares ``MCP_TRACE_FILE``). The body store is GLOBAL + content-addressed, so a
+        trusted sha is the only thing standing between one tenant and another's body:
+        a forged ``(sha, body)`` pair would either poison the sha for every later
+        fetch of the real content, or — paired with a fabricated record — read a body
+        by an attacker-chosen address (IDOR-by-content-address).
+
+        We trust the agent's sha only if the bytes we hold reproduce it. On a miss we
+        null BOTH the sha and the body, so neither the body write nor the provenance
+        record (built from this source's sha) trusts an address we can't verify. A
+        self-consistent forgery still passes, but it can only claim its own hash —
+        colliding with real content would require breaking SHA-256. Host-computed
+        shas (web/sec/market) are produced by trusted code and left untouched.
+
+        A legitimately truncated MCP body (>64 KiB) hashes to the head, not the full
+        result, so it fails here and loses its body — honest, since we never hold the
+        full bytes to verify or serve anyway.
+        """
+        if source.source_type != "mcp_tool":
+            return
+        body, sha = source.result_body, source.result_sha256
+        if body and sha and hashlib.sha256(body.encode("utf-8")).hexdigest() == sha:
+            # The head we hold IS the full verified body; size it honestly.
+            source.result_size = len(body.encode("utf-8"))
+            return
+        source.result_sha256 = None
+        source.result_body = None
+
+    def _body_item(self, source: ProvenanceSource) -> tuple | None:
+        """Build a ``(sha, redacted_body, byte_len, content_type)`` store tuple.
+
+        Returns None unless the source carries both a body and the
+        ``result_sha256`` it hashes to, or if redaction itself fails (we never
+        store an unredacted body). Pure — no DB; the batch is flushed once per turn.
+        """
+        if not source.result_body or not source.result_sha256:
+            return None
+        redacted = self._redact_body(source.result_body)
+        if redacted is None:
+            return None
+        size = source.result_size
+        if not isinstance(size, int) or size < 0:
+            size = len(redacted.encode("utf-8"))
+        return (
+            source.result_sha256,
+            redacted,
+            size,
+            "text/plain; charset=utf-8",
+        )
+
+    async def _flush_bodies(self, items: list[tuple]) -> None:
+        """Batch-write a turn's redacted bodies to the store (best-effort).
+
+        Never raises (mirrors ``WorkspaceContextMiddleware._sync_front_matter_to_db``):
+        a lost body must not break the turn. ``store_result_bodies`` dedupes by sha
+        and upserts in one connection.
+        """
+        if not items:
+            return
+        try:
+            from src.server.database.provenance_bodies import store_result_bodies
+
+            await store_result_bodies(items)
+        except Exception as e:
+            logger.warning(
+                "[PROVENANCE] store_result_bodies failed (%d items): %s",
+                len(items),
+                e,
+            )
 
     # ----- per-tool extractors ------------------------------------------
 
@@ -329,6 +482,8 @@ class ProvenanceMiddleware(AgentMiddleware):
                 result_sha256=sha256,
                 result_size=size,
                 result_snippet=snippet,
+                # Body = the same per-item value that produced result_sha256.
+                result_body=_canonical_body(item),
             )
 
     def _extract_web_fetch(
@@ -350,6 +505,7 @@ class ProvenanceMiddleware(AgentMiddleware):
             result_sha256=sha256,
             result_size=size,
             result_snippet=snippet,
+            result_body=_canonical_body(content),
         )
 
     def _extract_sec_filing(
@@ -384,6 +540,7 @@ class ProvenanceMiddleware(AgentMiddleware):
                     result_sha256=sha256,
                     result_size=size,
                     result_snippet=snippet,
+                    result_body=_canonical_body(filing),
                 )
             return
 
@@ -403,6 +560,7 @@ class ProvenanceMiddleware(AgentMiddleware):
             result_sha256=sha256,
             result_size=size,
             result_snippet=snippet,
+            result_body=_canonical_body(artifact),
         )
 
     def _extract_market_data(
@@ -445,6 +603,7 @@ class ProvenanceMiddleware(AgentMiddleware):
             artifact if artifact is not None else getattr(result, "content", result)
         )
         sha256, size, snippet = fingerprint_result(fingerprint_target)
+        body = _canonical_body(fingerprint_target)
         for identifier in identifiers:
             yield ProvenanceSource(
                 record_id=_new_id(),
@@ -458,6 +617,7 @@ class ProvenanceMiddleware(AgentMiddleware):
                 result_sha256=sha256,
                 result_size=size,
                 result_snippet=snippet,
+                result_body=body,
             )
 
     def _extract_file_read(
@@ -494,9 +654,11 @@ class ProvenanceMiddleware(AgentMiddleware):
     ) -> Iterator[ProvenanceSource]:
         """One mcp_tool source per entry in the result artifact's ``mcp_trace``.
 
-        Contract (Phase B2): artifact is a dict with key ``mcp_trace``, a list
-        of ``{server, tool, args, result_sha256, result_size, result_snippet,
-        timestamp}``. Yields nothing when the artifact/trace is absent.
+        Shared by ExecuteCode and Bash — both surface an ``mcp_trace`` artifact
+        for the MCP calls their in-sandbox code made. Contract (Phase B2):
+        artifact is a dict with key ``mcp_trace``, a list of ``{server, tool,
+        args, result_sha256, result_size, result_snippet, timestamp}``. Yields
+        nothing when the artifact/trace is absent.
         """
         artifact = getattr(result, "artifact", None)
         trace = artifact.get("mcp_trace") if isinstance(artifact, dict) else []
@@ -530,5 +692,12 @@ class ProvenanceMiddleware(AgentMiddleware):
                 result_size=entry.get("result_size"),
                 result_snippet=_truncate(
                     entry.get("result_snippet"), SNIPPET_MAX_CHARS
+                ),
+                # The per-call body the sandbox captured for THIS MCP call (the
+                # root fix: NOT the aggregate ExecuteCode stdout). Re-clamped
+                # host-side as the trace is agent-authored. May be absent once
+                # the sandbox's per-execution body budget is exhausted.
+                result_body=_clamp_body_bytes(
+                    entry.get("result_body"), RESULT_BODY_MAX_BYTES
                 ),
             )

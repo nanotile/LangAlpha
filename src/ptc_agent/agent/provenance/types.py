@@ -21,6 +21,12 @@ from datetime import datetime, timezone
 # required for cross-surface dedup.
 SNIPPET_MAX_CHARS = 500
 
+# Canonical per-body cap (bytes). Doubles as the in-sandbox transport cap on the
+# untrusted mcp_tool trace channel. The server-side body store re-declares the
+# same value locally (to stay out of the agent import graph); both copies MUST
+# hold this number.
+RESULT_BODY_MAX_BYTES = 64 * 1024
+
 
 @dataclass
 class ProvenanceSource:
@@ -49,6 +55,11 @@ class ProvenanceSource:
     result_sha256: str | None = None
     result_size: int | None = None
     result_snippet: str | None = None
+    # Transient: the full (redacted) per-access body whose hash is
+    # ``result_sha256``. Consumed live by ProvenanceMiddleware to write the
+    # content-addressed body store; intentionally NOT carried by
+    # ``build_provenance_event`` so it never rides the SSE event.
+    result_body: str | None = None
     agent: str | None = None
 
 
