@@ -304,6 +304,13 @@ export interface UserMessage {
   chartSelections?: import('@/pages/MarketView/stores/chartSelectionStore').ChartSelectionSnapshot[];
   steeringDelivered?: boolean;
   steering?: boolean;
+  /**
+   * Set while this message is parked during an in-progress compaction (the
+   * backend 409s a POST mid-compaction). Rendered as a shimmer bubble like a
+   * pending steering message; auto-sent (or steered) once compaction finishes,
+   * and dropped if the user stops the compaction.
+   */
+  queued?: boolean;
 }
 
 export interface AssistantMessage {

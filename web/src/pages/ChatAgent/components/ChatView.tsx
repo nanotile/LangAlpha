@@ -1,7 +1,7 @@
 import React, { Suspense, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, FolderOpen, ScrollText, CheckCircle2, Circle, Loader2, TextSelect, Minus, PanelLeftOpen, Menu, Info, Pin, PinOff } from 'lucide-react';
+import { ArrowLeft, FolderOpen, ScrollText, CheckCircle2, Circle, Loader2, TextSelect, Minus, PanelLeftOpen, Menu, Info, Pin, PinOff, Clock } from 'lucide-react';
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card';
 import { useIsMobile, getIsMobileSnapshot } from '@/hooks/useIsMobile';
 import { useNarrowContainer } from '@/hooks/useNarrowContainer';
@@ -23,6 +23,13 @@ import { clampPanelWidth as clampPanelWidthUtil } from '@/lib/panelUtils';
 import { useCardState } from '../hooks/useCardState';
 import { useWorkspaceFiles } from '../hooks/useWorkspaceFiles';
 import { classifyAgentPath, computeAgentArtifactRouting, type MemoryTier } from '../utils/agentPaths';
+import {
+  routeStopAction,
+  compactionErrorCode,
+  isUserStoppedCompaction,
+  shouldClearCompactingFlag,
+  isManualCompactionInFlight,
+} from '../utils/compactionControl';
 import { countToolCalls } from '../utils/subagentMetrics';
 import { type SubagentTokenUsage, ZERO_USAGE } from '../utils/tokenUsage';
 import {
@@ -673,6 +680,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
     workspaceStarting,
     isCompacting,
     setIsCompacting,
+    queuedSend,
     isLoadingHistory,
     isReconnecting: _isReconnecting,
     messageError,
@@ -680,6 +688,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
     clearReturnedSteering,
     handleSendMessage,
     stopWorkflow,
+    stopCompaction,
     pendingInterrupt,
     pendingRejection,
     handleApproveInterrupt,
@@ -844,6 +853,32 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
     void stopWorkflow();
   }, [stopWorkflow]);
 
+  // Set when the user stops a MANUAL compaction so handleAction's .catch
+  // (the summarize/offload request rejects once the backend cancels it) shows a
+  // "stopped" notice instead of an error banner. Reset at the start of each new
+  // compaction in handleAction.
+  const userStoppedCompactionRef = useRef(false);
+
+  // Monotonic token: each manual compaction trigger bumps it, so a late
+  // resolution/rejection from a superseded compaction can detect it is stale
+  // and skip flipping isCompacting (RT#2). Without this, a rapid
+  // /compact→Stop→/compact lets the first request's late .catch clear the flag
+  // and unmask the input while the second compaction is still running.
+  const compactionGenerationRef = useRef(0);
+
+  // Single stop control reused by the chat-input Stop button. A manual
+  // compaction has isLoading=false (no streaming turn) so it routes to
+  // stopCompaction; otherwise (a running turn, including an auto Tier-2
+  // summarize) it tears down the turn via stopWorkflow.
+  const handleStopButton = useCallback(() => {
+    if (routeStopAction({ isCompacting, isLoading }) === 'compaction') {
+      userStoppedCompactionRef.current = true;
+      void stopCompaction();
+    } else {
+      handleStop();
+    }
+  }, [isCompacting, isLoading, stopCompaction, handleStop]);
+
   // Wrapper: converts ChatInput's (message, planMode, attachments, slashCommands) into
   // handleSendMessage(message, planMode, additionalContext, attachmentMeta)
   const handleSendWithAttachments = useCallback((message: string, planMode: boolean, attachments: Attachment[] = [], slashCommands: SlashCommand[] = [], modelOptions: ModelOptions = {}) => {
@@ -919,12 +954,54 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
       insertNotification(t(fallbackKey), 'warning');
     };
 
+    // A user Stop while this compaction runs cancels the backend call, which
+    // rejects the request below. Treat that as a clean stop (not an error).
+    // The backend's shared cancellation wrapper tags any user-cancelled request
+    // with a structured detail (409 {code: "request_cancelled"}); honor that
+    // even when the local ref was already consumed — a rapid stop→retrigger
+    // resets the ref before this rejection lands, which would otherwise mislabel
+    // the stop as a failure.
+    const handleActionError = (err: unknown) => {
+      const code = compactionErrorCode(err);
+      if (isUserStoppedCompaction({ userStopped: userStoppedCompactionRef.current, errorCode: code })) {
+        userStoppedCompactionRef.current = false;
+        insertNotification(t('chat.compactionStopped'), 'info');
+        return;
+      }
+      surfaceActionError(err, 'chat.compactionError');
+    };
+
+    // Snapshot the generation BEFORE the await so a superseded compaction's late
+    // settlement leaves the active one's isCompacting flag alone (RT#2).
+    const clearIfCurrent = (myGeneration: number) => {
+      if (shouldClearCompactingFlag(myGeneration, compactionGenerationRef.current)) {
+        setIsCompacting(false);
+      }
+    };
+
+    // Refuse a duplicate /compact or /offload while a manual compaction is
+    // already running (#1). The duplicate would 409 ("compaction_in_progress")
+    // on the backend, but it first bumps the generation token — which would
+    // strand isCompacting, since the real (earlier-generation) compaction's
+    // completion could then no longer clear the flag. Block it before it enters
+    // the generation protocol. (An auto Tier-2 summarize has isLoading=true, so
+    // this guard does not fire there.)
+    if (
+      (cmd.name === 'compact' || cmd.name === 'offload') &&
+      isManualCompactionInFlight({ isCompacting, isLoading })
+    ) {
+      insertNotification(t('chat.compactBusy'), 'warning');
+      return;
+    }
+
     if (cmd.name === 'compact') {
       // SSE wire action value "summarize" is preserved as a protocol contract.
+      userStoppedCompactionRef.current = false;
+      const myGeneration = ++compactionGenerationRef.current;
       setIsCompacting('summarize');
       summarizeThread(tid)
         .then((data: Record<string, unknown>) => {
-          setIsCompacting(false);
+          clearIfCurrent(myGeneration);
           const detail = (data.summary_text as string | undefined) || undefined;
           insertNotification(
             t('chat.compactedNotification', { from: data.original_message_count }),
@@ -934,14 +1011,16 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
         })
         .catch((err: unknown) => {
           console.error('[ChatView] Compaction failed:', err);
-          surfaceActionError(err, 'chat.compactionError');
-          setIsCompacting(false);
+          handleActionError(err);
+          clearIfCurrent(myGeneration);
         });
     } else if (cmd.name === 'offload') {
+      userStoppedCompactionRef.current = false;
+      const myGeneration = ++compactionGenerationRef.current;
       setIsCompacting('offload');
       offloadThread(tid)
         .then((data: Record<string, unknown>) => {
-          setIsCompacting(false);
+          clearIfCurrent(myGeneration);
           insertNotification(
             t('chat.offloadedNotification', {
               args: (data.offloaded_args as number) || 0,
@@ -951,11 +1030,11 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
         })
         .catch((err: unknown) => {
           console.error('[ChatView] Offload failed:', err);
-          surfaceActionError(err, 'chat.compactionError');
-          setIsCompacting(false);
+          handleActionError(err);
+          clearIfCurrent(myGeneration);
         });
     }
-  }, [currentThreadId, threadId, insertNotification, setIsCompacting, t]);
+  }, [currentThreadId, threadId, insertNotification, setIsCompacting, isCompacting, isLoading, t]);
 
   // Show sidebar at the start of each backend response (streaming)
   // Auto-refresh workspace files when agent finishes (isLoading transitions true→false)
@@ -2550,17 +2629,28 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
                     )}
                     {isCompacting && (
                       <div className="flex items-center gap-2 px-3 py-1.5 text-xs"
+                        role="status" aria-live="polite"
                         style={{ color: 'var(--color-text-tertiary)' }}>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--color-accent-primary)' }} />
+                        <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--color-accent-primary)' }} />
                         {t(isCompacting === 'offload' ? 'chat.offloading' : 'chat.compacting')}
+                      </div>
+                    )}
+                    {queuedSend && (
+                      <div className="flex items-center gap-2 px-3 py-1.5 text-xs"
+                        role="status" aria-live="polite"
+                        style={{ color: 'var(--color-text-tertiary)' }}
+                        title={queuedSend === '…' ? undefined : queuedSend}>
+                        <Clock aria-hidden="true" className="h-3.5 w-3.5" style={{ color: 'var(--color-accent-primary)' }} />
+                        {t('chat.queuedSend')}
                       </div>
                     )}
                     <ChatInput
                       ref={chatInputRef}
                       onSend={handleSendWithAttachments}
                       disabled={isLoadingHistory || !workspaceId || !!pendingInterrupt}
-                      onStop={handleStop}
+                      onStop={handleStopButton}
                       isLoading={isLoading}
+                      isCompacting={!!isCompacting}
                       placeholder={chatPlaceholder}
                       files={workspaceFiles}
                       tokenUsage={tokenUsage}
