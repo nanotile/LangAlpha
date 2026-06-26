@@ -892,6 +892,151 @@ class TestWaitOrSteer:
 
         assert exc_info.value.status_code == 409
 
+    @pytest.mark.asyncio
+    async def test_compacting_raises_409_without_steering(self):
+        """A thread mid-compaction whose wait timed out → 409 'compacting',
+        never steered (steering mid-summarize corrupts the context rewrite)."""
+        from fastapi import HTTPException
+
+        from src.server.handlers.chat._common import wait_or_steer
+
+        manager = AsyncMock()
+        manager.wait_for_admission = AsyncMock(return_value="compacting")
+
+        with (
+            patch(
+                "src.server.handlers.chat.steering.steer_thread",
+                new_callable=AsyncMock,
+            ) as mock_steer,
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await wait_or_steer(manager, "t-1", "hello", "u-1")
+
+        assert exc_info.value.status_code == 409
+        # Structured detail so the client can recognize the transient state and
+        # re-queue; no thread_id leaked into the user-facing message.
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail["code"] == "compacting"
+        assert "t-1" not in detail["message"]
+        mock_steer.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# admission_conflict_detail (dispatched-flow 409 message mapping)
+# ---------------------------------------------------------------------------
+
+
+class TestAdmissionConflictDetail:
+    """The dispatched (X-Dispatch=background) flow can't steer, so a non-fresh
+    admission state becomes a 409. This shared helper maps the admission state
+    to its retry message — same mapping for PTC and Flash."""
+
+    def test_compacting_state_names_compaction(self):
+        from src.server.handlers.chat._common import admission_conflict_detail
+
+        detail = admission_conflict_detail("t-1", "compacting")
+        assert "compacting" in detail
+        assert "retry" in detail.lower()
+
+    def test_stopping_state_names_stopping(self):
+        from src.server.handlers.chat._common import admission_conflict_detail
+
+        detail = admission_conflict_detail("t-1", "stopping")
+        assert "stopping" in detail
+        assert "retry" in detail.lower()
+
+    def test_running_state_is_the_generic_fallback(self):
+        from src.server.handlers.chat._common import admission_conflict_detail
+
+        # Any other non-fresh state (e.g. "running") falls through to the
+        # "still running, could not be admitted" message.
+        detail = admission_conflict_detail("t-1", "running")
+        assert "still running" in detail
+        assert "could not be admitted" in detail
+
+    def test_unknown_state_falls_back_to_generic(self):
+        from src.server.handlers.chat._common import admission_conflict_detail
+
+        assert "still running" in admission_conflict_detail("t-1", "wedged")
+
+
+# ---------------------------------------------------------------------------
+# handle_workflow_error — HTTPException (admission conflict) handling
+# ---------------------------------------------------------------------------
+
+
+class TestHandleWorkflowErrorHTTPException:
+    """An HTTPException reaching the workflow error handler is a deliberate
+    protocol response (e.g. a 409 admission conflict raised in-generator by
+    wait_or_steer / the dispatched gate), not an execution failure. It must
+    surface to the client as an SSE error but never persist a conversation
+    error or call mark_failed — mark_failed runs with run_id=None here, and
+    the run_id guard is skipped when run_id is None, so it would clobber a
+    concurrently-running peer turn's status to FAILED."""
+
+    @pytest.mark.asyncio
+    async def test_http_exception_surfaces_error_but_skips_persist_and_mark_failed(
+        self,
+    ):
+        from fastapi import HTTPException
+
+        from src.server.handlers.chat._common import handle_workflow_error
+
+        exc = HTTPException(
+            status_code=409,
+            detail={"code": "compacting", "message": "compacting; retry shortly"},
+        )
+
+        persistence_service = AsyncMock()
+        tracker = AsyncMock()
+        handler = MagicMock()
+        handler.get_tool_usage = MagicMock(return_value=None)
+        handler.get_sse_events = MagicMock(return_value=None)
+        handler._format_sse_event = MagicMock(
+            side_effect=lambda ev, data: f"event: {ev}\ndata: {data}\n\n"
+        )
+        request = MagicMock()
+        request.workspace_id = None
+        request.locale = None
+        request.timezone = None
+
+        with (
+            patch(
+                "src.server.handlers.chat._common.WorkflowTracker"
+            ) as mock_tracker_cls,
+            patch(
+                "src.server.handlers.chat._common.release_burst_slot",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_tracker_cls.get_instance.return_value = tracker
+            events = [
+                ev
+                async for ev in handle_workflow_error(
+                    exc,
+                    thread_id="t-1",
+                    user_id="u-1",
+                    workspace_id="w-1",
+                    handler=handler,
+                    token_callback=None,
+                    persistence_service=persistence_service,
+                    start_time=0.0,
+                    request=request,
+                    is_byok=False,
+                    msg_type="ptc",
+                    log_prefix="PTC_TEST",
+                )
+            ]
+
+        # The client still sees a clean error event...
+        assert any("event: error" in ev for ev in events)
+        assert any("compacting" in ev for ev in events)
+        # ...but the conflict is never persisted as a turn failure and never
+        # clobbers the (possibly peer-owned) tracker status.
+        persistence_service.persist_error.assert_not_awaited()
+        tracker.mark_failed.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # serialize_context_metadata

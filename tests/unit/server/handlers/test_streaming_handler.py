@@ -1117,3 +1117,102 @@ class TestFinalizeStoppedEvents:
 
         assert len(second) == first_len
         assert handler._stop_finalized is True
+
+
+# ---------------------------------------------------------------------------
+# Compaction admission-guard wiring
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionWindowGuard:
+    """_open_compaction_window / _close_compaction_window drive the
+    BackgroundTaskManager admission guard off compaction-window cardinality:
+    the guard opens on the FIRST window and closes only when the LAST one
+    (main + any overlapping subgraph window) is gone."""
+
+    BTM = (
+        "src.server.services.background_task_manager."
+        "BackgroundTaskManager.get_instance"
+    )
+
+    def _make_handler(self, thread_id="test-thread"):
+        from src.server.handlers.streaming_handler import WorkflowStreamHandler
+
+        return WorkflowStreamHandler(thread_id=thread_id, run_id="r-test")
+
+    def test_first_window_opens_guard(self):
+        handler = self._make_handler()
+        manager = MagicMock()
+        manager.begin_compaction.return_value = True
+        with patch(self.BTM, return_value=manager):
+            handler._open_compaction_window(())
+        manager.begin_compaction.assert_called_once_with("test-thread")
+        assert handler._compaction_active is True
+        assert () in handler._compaction_windows
+
+    def test_overlapping_windows_open_guard_once(self):
+        handler = self._make_handler()
+        manager = MagicMock()
+        with patch(self.BTM, return_value=manager):
+            handler._open_compaction_window(())
+            handler._open_compaction_window(("sub",))
+        manager.begin_compaction.assert_called_once_with("test-thread")
+        assert handler._compaction_windows == {(), ("sub",)}
+
+    def test_guard_released_only_when_last_window_closes(self):
+        handler = self._make_handler()
+        manager = MagicMock()
+        manager.begin_compaction.return_value = True
+        with patch(self.BTM, return_value=manager):
+            handler._open_compaction_window(())
+            handler._open_compaction_window(("sub",))
+            handler._close_compaction_window(("sub",))
+            # One window remains → the guard must stay open.
+            manager.end_compaction.assert_not_called()
+            assert handler._compaction_active is True
+            handler._close_compaction_window(())
+        manager.end_compaction.assert_called_once_with("test-thread")
+        assert handler._compaction_active is False
+        assert handler._compaction_windows == set()
+
+    def test_close_without_open_is_noop(self):
+        handler = self._make_handler()
+        manager = MagicMock()
+        with patch(self.BTM, return_value=manager):
+            handler._close_compaction_window(())
+        manager.end_compaction.assert_not_called()
+        assert handler._compaction_active is False
+
+    def test_open_window_skips_release_when_guard_not_owned(self):
+        """begin_compaction returning False means another path already holds
+        the thread's guard. This handler must NOT take ownership: _compaction_active
+        stays False so closing the window (or the outer-finally net) never
+        end_compaction()s a guard it does not own."""
+        handler = self._make_handler()
+        manager = MagicMock()
+        manager.begin_compaction.return_value = False
+        with patch(self.BTM, return_value=manager):
+            handler._open_compaction_window(())
+            assert handler._compaction_active is False
+            handler._close_compaction_window(())
+        manager.end_compaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_outer_finally_releases_guard_on_stream_error(self):
+        """The outer finally is the sole safety net: if the stream aborts
+        (error / cancel / timeout) with a compaction window still open, the
+        guard is released exactly once so a queued POST is never stranded."""
+        handler = self._make_handler(thread_id="t-finally")
+        manager = MagicMock()
+        manager.begin_compaction.return_value = True
+        graph = MagicMock()
+        graph.astream.side_effect = RuntimeError("graph blew up")
+        with patch(self.BTM, return_value=manager):
+            handler._open_compaction_window(())  # _compaction_active=True
+            with pytest.raises(RuntimeError):
+                async for _ in handler.stream_workflow(
+                    graph, {}, {"configurable": {}}
+                ):
+                    pass
+        manager.end_compaction.assert_called_once_with("t-finally")
+        assert handler._compaction_active is False
