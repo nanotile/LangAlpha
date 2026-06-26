@@ -64,10 +64,10 @@ from ._common import (
     handle_workflow_error,
     init_tracking,
     inject_inline_reminders,
-    inject_skills,
     logger,
     normalize_request_messages,
     persist_or_skip_replay,
+    prepare_skill_contexts,
     process_hitl_response,
     serialize_context_metadata,
     setup_steering_tracking,
@@ -341,8 +341,18 @@ async def astream_flash_workflow(
                     f"noted for {effective_model}"
                 )
 
-        # Skill Context Injection (Flash mode)
-        loaded_skill_names = inject_skills(messages, request, config, mode="flash")
+        # Skill Context Resolution (Flash) — body injection happens in
+        # SkillsMiddleware, which dedups bodies already live in the thread. Only
+        # set on normal turns; HITL/replay carry no new user message to attach to.
+        if not request.hitl_response and not is_checkpoint_replay:
+            skill_contexts = prepare_skill_contexts(messages, request, mode="flash")
+        else:
+            skill_contexts = None
+        skill_dirs = (
+            [local_dir for local_dir, _ in config.skills.local_skill_dirs_with_sandbox()]
+            if skill_contexts
+            else None
+        )
 
         # Inline context injection (directive + widget + chart selection) --
         # Flash-specific. Skip on HITL resumes and checkpoint replay because
@@ -376,8 +386,7 @@ async def astream_flash_workflow(
             )
         else:
             input_state = {"messages": messages}
-            if loaded_skill_names:
-                input_state["loaded_skills"] = loaded_skill_names
+            # Skill tools auto-load via SkillsMiddleware (sets loaded_skills in state).
 
         graph_config = build_graph_config(
             thread_id=thread_id,
@@ -390,6 +399,8 @@ async def astream_flash_workflow(
             effective_model=effective_model,
             is_byok=is_byok,
             recursion_limit=get_flash_recursion_limit(),
+            skill_contexts=skill_contexts,
+            skill_dirs=skill_dirs,
         )
         graph_config["run_id"] = run_id
 

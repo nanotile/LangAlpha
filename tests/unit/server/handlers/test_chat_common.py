@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import psycopg
 import pytest
 
+from src.server.models.additional_context import SkillContext
 
 COMMON = "src.server.handlers.chat._common"
 
@@ -774,6 +775,34 @@ class TestBuildGraphConfig:
         config = self._build(timezone_str="UTC")
         assert config["configurable"]["timezone"] == "UTC"
 
+    def test_skill_contexts_and_dirs_threaded_to_configurable(self):
+        """The server→middleware handoff: both skill_contexts and skill_dirs must
+        land in ``configurable`` so SkillsMiddleware can inject + locate bodies."""
+        config = self._build(
+            skill_contexts=[{"name": "chart-annotation", "instruction": "AAPL:1d"}],
+            skill_dirs=["/skills"],
+        )
+        assert config["configurable"]["skill_contexts"] == [
+            {"name": "chart-annotation", "instruction": "AAPL:1d"}
+        ]
+        assert config["configurable"]["skill_dirs"] == ["/skills"]
+
+    def test_skill_contexts_without_dirs_omits_dirs(self):
+        """skill_dirs is nested under the skill_contexts gate; contexts may be
+        present while dirs default (middleware falls back to project_root/skills)."""
+        config = self._build(
+            skill_contexts=[{"name": "research"}], skill_dirs=None
+        )
+        assert config["configurable"]["skill_contexts"] == [{"name": "research"}]
+        assert "skill_dirs" not in config["configurable"]
+
+    def test_skill_dirs_without_contexts_is_dropped(self):
+        """No skills requested → neither key is set, even if skill_dirs is passed
+        (the ``if skill_contexts`` gate guards the whole block)."""
+        config = self._build(skill_contexts=None, skill_dirs=["/skills"])
+        assert "skill_contexts" not in config["configurable"]
+        assert "skill_dirs" not in config["configurable"]
+
 
 # ---------------------------------------------------------------------------
 # wait_or_steer
@@ -993,95 +1022,130 @@ class TestSetupSteeringTracking:
 
 
 # ---------------------------------------------------------------------------
-# inject_skills
+# prepare_skill_contexts
 # ---------------------------------------------------------------------------
 
 
-class TestInjectSkills:
+class TestPrepareSkillContexts:
     def test_no_skills_returns_empty(self):
-        from src.server.handlers.chat._common import inject_skills
+        from src.server.handlers.chat._common import prepare_skill_contexts
 
         request = MagicMock()
         request.additional_context = None
         request.hitl_response = None
         messages = [{"role": "user", "content": "hello"}]
-        config = MagicMock()
 
         with patch(f"{COMMON}.parse_skill_contexts", return_value=[]):
-            result = inject_skills(messages, request, config, mode="flash")
+            result = prepare_skill_contexts(messages, request, mode="flash")
 
         assert result == []
 
     def test_skill_from_additional_context(self):
-        from src.server.handlers.chat._common import inject_skills
+        from src.server.handlers.chat._common import prepare_skill_contexts
 
         request = MagicMock()
         request.additional_context = [MagicMock(type="skills")]
         request.hitl_response = None
         messages = [{"role": "user", "content": "hello"}]
-        config = MagicMock()
-        config.skills.local_skill_dirs_with_sandbox.return_value = [
-            ("/skills/dir", "/sandbox/dir")
-        ]
 
-        skill_result = MagicMock()
-        skill_result.content = "skill content"
-        skill_result.loaded_skill_names = ["research"]
+        ctx = SkillContext(type="skills", name="research", instruction="find news")
+        with patch(f"{COMMON}.parse_skill_contexts", return_value=[ctx]):
+            result = prepare_skill_contexts(messages, request, mode="flash")
 
-        with (
-            patch(f"{COMMON}.parse_skill_contexts", return_value=["skill_ctx"]),
-            patch(f"{COMMON}.build_skill_content", return_value=skill_result),
-        ):
-            result = inject_skills(messages, request, config, mode="flash")
+        # Returns plain dicts to thread through config; no body injected here.
+        assert result == [{"name": "research", "instruction": "find news"}]
+        assert messages[0]["content"] == "hello"
 
-        assert result == ["research"]
-        assert "skill content" in messages[0]["content"]
-
-    def test_slash_command_detection_fallback(self):
-        from src.server.handlers.chat._common import inject_skills
+    def test_slash_command_detection_fallback_strips_prefix(self):
+        from src.server.handlers.chat._common import prepare_skill_contexts
 
         request = MagicMock()
         request.additional_context = None
         request.hitl_response = None
         messages = [{"role": "user", "content": "/research market analysis"}]
-        config = MagicMock()
-        config.skills.local_skill_dirs_with_sandbox.return_value = []
 
-        detected_skill = MagicMock()
-        skill_result = MagicMock()
-        skill_result.content = "research skill loaded"
-        skill_result.loaded_skill_names = ["research"]
-
+        ctx = SkillContext(type="skills", name="research")
         with (
             patch(f"{COMMON}.parse_skill_contexts", return_value=[]),
             patch(
                 f"{COMMON}.detect_slash_commands",
-                return_value=("market analysis", [detected_skill]),
+                return_value=("market analysis", [ctx]),
             ),
-            patch(f"{COMMON}.build_skill_content", return_value=skill_result),
         ):
-            result = inject_skills(messages, request, config, mode="flash")
+            result = prepare_skill_contexts(messages, request, mode="flash")
 
-        assert result == ["research"]
-        # The message text should be cleaned (slash command stripped) then
-        # skill content appended
-        assert messages[0]["content"].startswith("market analysis")
-        assert "research skill loaded" in messages[0]["content"]
+        assert result == [{"name": "research", "instruction": None}]
+        # The /command prefix is stripped in place; no skill body appended.
+        assert messages[0]["content"] == "market analysis"
 
     def test_hitl_response_skips_slash_detection(self):
-        from src.server.handlers.chat._common import inject_skills
+        from src.server.handlers.chat._common import prepare_skill_contexts
 
         request = MagicMock()
         request.additional_context = None
         request.hitl_response = {"int-1": {}}
         messages = [{"role": "user", "content": "/research something"}]
-        config = MagicMock()
 
         with (
             patch(f"{COMMON}.parse_skill_contexts", return_value=[]),
             patch(f"{COMMON}.detect_slash_commands") as mock_detect,
         ):
-            result = inject_skills(messages, request, config, mode="flash")
+            result = prepare_skill_contexts(messages, request, mode="flash")
+
+        mock_detect.assert_not_called()
+        assert result == []
+
+    def test_slash_detection_on_multimodal_list_content(self):
+        """A supported attachment rewrites content into a block list; the slash
+        command must still activate, be stripped in its own text block, and leave
+        the attachment blocks intact."""
+        from src.server.handlers.chat._common import prepare_skill_contexts
+
+        request = MagicMock()
+        request.additional_context = None
+        request.hitl_response = None
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;x"}}
+        text_block = {"type": "text", "text": "/research market analysis"}
+        messages = [{"role": "user", "content": [image_block, text_block]}]
+
+        ctx = SkillContext(type="skills", name="research")
+        with (
+            patch(f"{COMMON}.parse_skill_contexts", return_value=[]),
+            patch(
+                f"{COMMON}.detect_slash_commands",
+                return_value=("market analysis", [ctx]),
+            ),
+        ):
+            result = prepare_skill_contexts(messages, request, mode="flash")
+
+        assert result == [{"name": "research", "instruction": None}]
+        # Prefix stripped in the text block; the image block survives untouched.
+        assert messages[0]["content"][0] is image_block
+        assert messages[0]["content"][1]["text"] == "market analysis"
+
+    def test_list_content_without_slash_block_skips_detection(self):
+        """List content whose text blocks don't lead with `/` activates nothing."""
+        from src.server.handlers.chat._common import prepare_skill_contexts
+
+        request = MagicMock()
+        request.additional_context = None
+        request.hitl_response = None
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "[Attached image: chart.png]"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;x"}},
+                    {"type": "text", "text": "what do you see"},
+                ],
+            }
+        ]
+
+        with (
+            patch(f"{COMMON}.parse_skill_contexts", return_value=[]),
+            patch(f"{COMMON}.detect_slash_commands") as mock_detect,
+        ):
+            result = prepare_skill_contexts(messages, request, mode="flash")
 
         mock_detect.assert_not_called()
         assert result == []
