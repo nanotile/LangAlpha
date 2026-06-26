@@ -19,7 +19,10 @@ from src.ptc_agent.agent.middleware.skills.content import (
     SkillPrefixResult,
     loaded_skill_marker,
 )
-from src.ptc_agent.agent.middleware.skills.middleware import SkillsMiddleware
+from src.ptc_agent.agent.middleware.skills.middleware import (
+    SkillsMiddleware,
+    _append_body_to_last_human,
+)
 
 MW = "src.ptc_agent.agent.middleware.skills.middleware"
 
@@ -42,8 +45,11 @@ async def test_fresh_skill_returns_body_and_loaded_skills():
         skill_contexts=[{"name": "chart-annotation", "instruction": "AAPL:1d"}],
         skill_dirs=["/skills"],
     )
+    # build_skill_content returns a clean self-contained block — NO leading "\n\n".
+    # The blank-line separator is the append's job (_join_body), so the mock must
+    # reflect the real contract or the separator regression slips through again.
     result_obj = SkillPrefixResult(
-        content="\n\nBODY-AND-INSTRUCTION", loaded_skill_names=["chart-annotation"]
+        content="BODY-AND-INSTRUCTION", loaded_skill_names=["chart-annotation"]
     )
 
     with (
@@ -56,12 +62,12 @@ async def test_fresh_skill_returns_body_and_loaded_skills():
     assert out["discovered_skills"] == []
     assert out["loaded_skills"] == ["chart-annotation"]
 
-    # Body appended to the SAME user message (id preserved -> add_messages replaces).
+    # Body appended to the SAME user message (id preserved -> add_messages replaces),
+    # with a blank-line separator between the user text and the skill body.
     assert len(out["messages"]) == 1
     injected = out["messages"][0]
     assert injected.id == "u1"
-    assert "annotate the chart" in injected.content
-    assert injected.content.endswith("BODY-AND-INSTRUCTION")
+    assert injected.content == "annotate the chart\n\nBODY-AND-INSTRUCTION"
 
     # already_loaded came from compute_already_loaded(state channels).
     ca_args = cal.call_args.args
@@ -90,7 +96,7 @@ async def test_already_loaded_skips_loaded_skills_keeps_instruction():
         skill_contexts=[{"name": "chart-annotation", "instruction": "NVDA:1h"}]
     )
     result_obj = SkillPrefixResult(
-        content="\n\n[Instruction: NVDA:1h]", loaded_skill_names=[]
+        content="[Instruction: NVDA:1h]", loaded_skill_names=[]
     )
 
     with (
@@ -100,7 +106,7 @@ async def test_already_loaded_skips_loaded_skills_keeps_instruction():
         out = await mw.abefore_agent(state, MagicMock(), config=config)
 
     assert "loaded_skills" not in out
-    assert out["messages"][0].content.endswith("[Instruction: NVDA:1h]")
+    assert out["messages"][0].content == "annotate\n\n[Instruction: NVDA:1h]"
     assert out["messages"][0].id == "u1"
 
 
@@ -208,7 +214,7 @@ async def test_injected_body_survives_patch_tool_calls_rewrite():
     def _fake_build(skills, *, skill_dirs, mode, already_loaded, message_id):
         block = f"{loaded_skill_marker('chart-annotation', message_id)}\nBODY\n</loaded-skill>"
         return SkillPrefixResult(
-            content=f"\n\n{block}\n\n[Instruction: AAPL:1d]",
+            content=f"{block}\n\n[Instruction: AAPL:1d]",
             loaded_skill_names=["chart-annotation"],
         )
 
@@ -238,6 +244,50 @@ async def test_injected_body_survives_patch_tool_calls_rewrite():
     assert len(humans) == 1
     assert humans[0].id == "h1"
     assert '<loaded-skill name="chart-annotation" mid="h1">' in humans[0].content
+
+
+class TestAppendBodyToLastHuman:
+    """The append join itself — exercised without mocking build_skill_content, so a
+    missing blank-line separator (the old wire format) can't slip past again.
+    """
+
+    BODY = '<loaded-skill name="chart-annotation" mid="u1">\nBODY\n</loaded-skill>'
+
+    def test_str_content_gets_blank_line_separator(self):
+        out = _append_body_to_last_human(
+            [HumanMessage(content="annotate the chart", id="u1")], self.BODY
+        )
+        # A blank line separates the user's text from the injected body — the exact
+        # wire format the server's old inline injection produced ("\n\n" + body).
+        assert out.content == f"annotate the chart\n\n{self.BODY}"
+        assert out.id == "u1"
+
+    def test_empty_str_content_has_no_leading_separator(self):
+        # Nothing precedes the body, so no dangling blank line.
+        out = _append_body_to_last_human([HumanMessage(content="", id="u1")], self.BODY)
+        assert out.content == self.BODY
+
+    def test_list_content_appends_a_fresh_block(self):
+        # Multimodal content: the body rides as its own text block — inherently
+        # separated, so no "\n\n" is woven into the prior block.
+        image = {"type": "image_url", "image_url": {"url": "data:..."}}
+        text = {"type": "text", "text": "annotate the chart"}
+        out = _append_body_to_last_human(
+            [HumanMessage(content=[image, text], id="u1")], self.BODY
+        )
+        assert out.content == [image, text, {"type": "text", "text": self.BODY}]
+
+    def test_dict_message_str_content_gets_separator(self):
+        out = _append_body_to_last_human(
+            [{"role": "user", "content": "hello", "id": "u1"}], self.BODY
+        )
+        assert out["content"] == f"hello\n\n{self.BODY}"
+
+    def test_non_human_last_message_returns_none(self):
+        assert (
+            _append_body_to_last_human([AIMessage(content="assistant", id="a1")], self.BODY)
+            is None
+        )
 
 
 def test_runnable_callable_injects_config_into_abefore_agent():

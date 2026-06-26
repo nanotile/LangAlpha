@@ -97,13 +97,23 @@ def _is_human_message(message: Any) -> bool:
     return getattr(message, "type", None) == "human"
 
 
+def _join_body(base: str, text: str) -> str:
+    """Join an appended skill body onto string message content with a blank-line
+    separator — the wire format the server's old inline injection used. List
+    content separates via its own appended block, so this is the string path only.
+    """
+    return f"{base}\n\n{text}" if base else text
+
+
 def _append_body_to_last_human(messages: list, text: str) -> BaseMessage | dict | None:
     """Return a copy of the last user message with ``text`` appended to its content.
 
     Preserves the message ``id`` so ``add_messages`` replaces it in place rather
-    than appending a new turn. Returns None when the last message isn't a user
-    turn — skill_contexts is only set on normal turns where it is, so that path is
-    just defense (tools still load via ``loaded_skills``; only the body is skipped).
+    than appending a new turn. String content is joined with a blank-line separator
+    (``_join_body``); list content gets ``text`` as a fresh block, which is already
+    separated. Returns None when the last message isn't a user turn — skill_contexts
+    is only set on normal turns where it is, so that path is just defense (tools still
+    load via ``loaded_skills``; only the body is skipped).
     """
     if not messages:
         return None
@@ -117,16 +127,16 @@ def _append_body_to_last_human(messages: list, text: str) -> BaseMessage | dict 
         if isinstance(content, list):
             new["content"] = content + [{"type": "text", "text": text}]
         else:
-            new["content"] = (content if isinstance(content, str) else "") + text
+            new["content"] = _join_body(content if isinstance(content, str) else "", text)
         return new
 
     content = getattr(last, "content", "")
     if isinstance(content, list):
         new_content = content + [{"type": "text", "text": text}]
     elif isinstance(content, str):
-        new_content = content + text
+        new_content = _join_body(content, text)
     else:
-        new_content = (str(content) if content else "") + text
+        new_content = _join_body(str(content) if content else "", text)
     return last.model_copy(update={"content": new_content})
 
 
