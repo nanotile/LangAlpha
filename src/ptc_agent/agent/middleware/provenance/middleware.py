@@ -115,6 +115,15 @@ _MAX_TRACE_ENTRIES = 200
 # event unclamped (the DB writer already coerces a bad value to NULL).
 _TIMESTAMP_MAX_CHARS = 64
 
+# Sanity ceiling for the agent-claimed true result size (the one trace field that
+# otherwise rode through to the SSE event and the BIGINT column unvalidated). It's
+# the TRUE byte length of an MCP result, so it can legitimately exceed the 64 KiB
+# body cap (a truncated body); this only rejects a non-numeric, negative, or absurd
+# value a poisoned trace could forge. Generous — no honest single result approaches
+# it (real maxima are low single-digit MB), but it keeps a fabricated exabyte size
+# out of the record/event.
+_RESULT_SIZE_MAX_BYTES = 256 * 1024 * 1024
+
 # Max concurrent in-flight background body-store writes per middleware instance.
 # A backpressure valve: once this many flushes are outstanding, awrap_tool_call
 # waits for one to finish before scheduling the next, so a burst of source-bearing
@@ -213,6 +222,23 @@ def _clamp_body_bytes(value: Any, limit: int) -> str | None:
     if len(encoded) <= limit:
         return value
     return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _coerce_result_size(value: Any) -> int | None:
+    """Trust the agent-authored ``result_size`` only as a bounded non-negative int.
+
+    Every other trace field is clamped on the way in; ``result_size`` rode through
+    raw onto the SSE event and the BIGINT column. On a verified body
+    ``_verify_source_sha`` overwrites it with the real length, so this guards the
+    unverified path (a truncated body, or a forged trace): a non-numeric, negative,
+    or absurd size becomes None rather than being emitted/persisted. ``bool`` is
+    excluded since it is an ``int`` subclass.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0 or value > _RESULT_SIZE_MAX_BYTES:
+        return None
+    return value
 
 
 def _is_error_result(result: Any) -> bool:
@@ -778,7 +804,7 @@ class ProvenanceMiddleware(AgentMiddleware):
                 args_fingerprint=hash_args(entry.get("args")),
                 args=redact_args(entry.get("args")),
                 result_sha256=_truncate(entry.get("result_sha256"), _SHA_MAX_CHARS),
-                result_size=entry.get("result_size"),
+                result_size=_coerce_result_size(entry.get("result_size")),
                 result_snippet=_truncate(
                     entry.get("result_snippet"), SNIPPET_MAX_CHARS
                 ),

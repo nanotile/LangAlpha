@@ -50,7 +50,7 @@ _GC_LOCK_KEY = "provenance_gc_sweep"
 # it. Single source of truth: both sweep_orphan_bodies and ProvenanceGCService
 # resolve their grace from this, and the reuse-touch window below derives from it
 # so the two can't drift.
-_GC_GRACE_DAYS = 7
+GC_GRACE_DAYS = 7
 
 # Reuse-touch window (days). A dedup write refreshes an existing body's created_at
 # ONLY when it's older than this — re-arming the grace window for a body being
@@ -68,7 +68,7 @@ _GC_GRACE_DAYS = 7
 # DELETE on the same rows (a deadlock surface, on exactly the hottest rows). The
 # age-gated touch keeps the common path lock-free and only locks the rare row
 # that is actually near GC-eligibility.
-_REUSE_TOUCH_AFTER_DAYS = _GC_GRACE_DAYS - 1
+_REUSE_TOUCH_AFTER_DAYS = GC_GRACE_DAYS - 1
 
 # A real SHA-256 hexdigest. Object keys are derived from the sha, so anything that
 # isn't a clean digest (e.g. a path-traversal payload from a future untrusted
@@ -320,7 +320,7 @@ async def fetch_full_body(
         return None
 
 
-async def sweep_orphan_bodies(grace_days: int = _GC_GRACE_DAYS) -> int:
+async def sweep_orphan_bodies(grace_days: int = GC_GRACE_DAYS) -> int:
     """Delete body rows unreferenced by any provenance record past the grace window.
 
     Mark-sweep GC: removes rows whose ``result_sha256`` no longer appears in

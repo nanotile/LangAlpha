@@ -52,6 +52,7 @@ from src.server.database.conversation import (
     get_replay_thread_data,
 )
 from src.server.database.provenance import (
+    get_provenance_body_refs,
     get_provenance_for_thread,
     get_provenance_record,
 )
@@ -1406,16 +1407,18 @@ async def get_provenance_bodies(
     """
     try:
         await require_thread_owner(thread_id, x_user_id)
-        rows = await get_provenance_for_thread(thread_id)
 
         from src.server.database.conversation import get_db_connection
         from src.server.database.provenance_bodies import fetch_result_bodies
 
-        eligible = [row for row in rows if row.get("result_sha256")]
-        capped = len(eligible) > limit
-        eligible = eligible[:limit]
-        shas = [row["result_sha256"] for row in eligible]
+        # Eligible refs are filtered + capped in SQL (LIMIT limit+1) and the body
+        # fetch shares the same connection, so a long thread doesn't transfer every
+        # record (and its args JSON) just to discard all but `limit`.
         async with get_db_connection() as conn:
+            eligible = await get_provenance_body_refs(conn, thread_id, limit)
+            capped = len(eligible) > limit
+            eligible = eligible[:limit]
+            shas = [row["result_sha256"] for row in eligible]
             bodies = await fetch_result_bodies(conn, shas)
 
         records = []

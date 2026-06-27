@@ -73,9 +73,10 @@ async def _fake_db_conn():
 def _patch_body_store(owner, rows, bodies, *, full_body=None):
     """Patch owner + record lookups + the body-store reads the verifier endpoints use.
 
-    Patches both the list read (``get_provenance_for_thread``, used by ``/bodies``)
-    and the targeted single-record read (``get_provenance_record``, used by
-    ``/{id}/body``); the latter matches ``rows`` by record id so unknown ids 404.
+    Patches both the list read (``get_provenance_body_refs``, used by ``/bodies``,
+    which the endpoint filters + caps in SQL) and the targeted single-record read
+    (``get_provenance_record``, used by ``/{id}/body``); the latter matches ``rows``
+    by record id so unknown ids 404.
     """
 
     async def _get_record(thread_id, record_id):
@@ -84,14 +85,19 @@ def _patch_body_store(owner, rows, bodies, *, full_body=None):
             None,
         )
 
+    async def _get_body_refs(conn, thread_id, limit):
+        # Mirror the SQL: eligible rows in order, capped at limit + 1.
+        eligible = [r for r in rows if r.get("result_sha256")]
+        return eligible[: limit + 1]
+
     patches = [
         patch(
             "src.server.database.conversation.get_thread_owner_id",
             new=AsyncMock(return_value=owner),
         ),
         patch(
-            "src.server.app.threads.get_provenance_for_thread",
-            new=AsyncMock(return_value=rows),
+            "src.server.app.threads.get_provenance_body_refs",
+            new=AsyncMock(side_effect=_get_body_refs),
         ),
         patch(
             "src.server.app.threads.get_provenance_record",

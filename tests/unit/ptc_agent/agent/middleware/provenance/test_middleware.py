@@ -412,6 +412,40 @@ async def test_execute_code_one_mcp_tool_event_per_trace_entry(middleware):
 
 
 @pytest.mark.asyncio
+async def test_execute_code_coerces_malformed_result_size(middleware):
+    """Agent-authored result_size is validated like the other trace fields.
+
+    It rode through raw onto the SSE event + BIGINT column; a non-numeric,
+    negative, or absurd value is now coerced to None. A valid size on an
+    unverified entry survives — it's the only signal that a large (truncated)
+    result existed.
+    """
+    base = {
+        "server": "s",
+        "args": {},
+        "result_snippet": "x",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    }
+    artifact = {
+        "mcp_trace": [
+            {**base, "tool": "bad_str", "result_sha256": "a" * 64, "result_size": "12"},
+            {**base, "tool": "negative", "result_sha256": "b" * 64, "result_size": -5},
+            {**base, "tool": "absurd", "result_sha256": "c" * 64, "result_size": 10**18},
+            {**base, "tool": "ok", "result_sha256": "d" * 64, "result_size": 4096},
+        ]
+    }
+    emitted = []
+    await _run(
+        middleware,
+        _make_request("ExecuteCode", {"code": "..."}, tool_call_id="ec-1"),
+        _result(content="SUCCESS", artifact=artifact),
+        emitted,
+    )
+
+    assert [e["result_size"] for e in emitted] == [None, None, None, 4096]
+
+
+@pytest.mark.asyncio
 async def test_execute_code_strips_mcp_trace_from_artifact(middleware):
     """mcp_trace must not survive on the artifact (it would ride tool_call_result)."""
     artifact = {

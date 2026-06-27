@@ -336,6 +336,37 @@ async def get_provenance_for_thread(
             return [dict(row) for row in rows]
 
 
+async def get_provenance_body_refs(
+    conn,
+    conversation_thread_id: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """(record_id, sha) refs for the body-list endpoint, capped in SQL.
+
+    Only the records that carry a ``result_sha256``, in the same turn order as
+    ``get_provenance_for_thread`` but filtered + ``LIMIT``-ed in SQL so a long
+    thread doesn't transfer every row (and its ``args`` JSON) just to discard all
+    but ``limit``. Fetches ``limit + 1`` so the caller can detect "more were
+    available" for its ``capped`` flag. Runs on the caller's connection so the
+    body fetch reuses it.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            """
+            SELECT provenance_record_id, result_sha256
+            FROM provenance_records
+            WHERE conversation_thread_id = %s
+              AND result_sha256 IS NOT NULL
+            ORDER BY turn_index ASC,
+                     source_timestamp ASC NULLS LAST, created_at ASC
+            LIMIT %s
+            """,
+            (conversation_thread_id, limit + 1),
+        )
+        rows = await cur.fetchall()
+        return [dict(row) for row in rows]
+
+
 async def get_provenance_record(
     conversation_thread_id: str,
     provenance_record_id: str,

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from src.server.database.provenance_bodies import _GC_GRACE_DAYS, sweep_orphan_bodies
+from src.server.database.provenance_bodies import GC_GRACE_DAYS, sweep_orphan_bodies
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_INTERVAL_SECONDS = 86400
 # Grace window before an unreferenced body is reaped, so a body written mid-turn
 # isn't swept before its provenance row commits. Sourced from provenance_bodies
-# so the sweep grace and the reuse-touch window stay coupled (see _GC_GRACE_DAYS).
-_DEFAULT_GRACE_DAYS = _GC_GRACE_DAYS
+# so the sweep grace and the reuse-touch window stay coupled (see GC_GRACE_DAYS).
+_DEFAULT_GRACE_DAYS = GC_GRACE_DAYS
 
 
 class ProvenanceGCService:
