@@ -128,4 +128,56 @@ describe('useChatMessages — cross-thread navigation reconnect', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(mockReconnect).toHaveBeenCalledTimes(2);
   });
+
+  it("a superseded reconnect unwinding does not clear the new thread's spinner", async () => {
+    // Two reconnects that both HANG, so we can read isReconnecting across the
+    // supersede. Thread A streams; navigating to B supersedes A and starts B's
+    // own (still-pending) reconnect. When A's superseded reconnect finally
+    // unwinds, its `finally` must NOT clear isReconnecting — that spinner now
+    // belongs to B. Pre-fix the clear was unconditional and hid B's spinner.
+    let resolveA: (() => void) | undefined;
+    let resolveB: (() => void) | undefined;
+    mockReconnect
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ disconnected: boolean; aborted: boolean }>((res) => {
+            resolveA = () => res({ disconnected: false, aborted: false });
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ disconnected: boolean; aborted: boolean }>((res) => {
+            resolveB = () => res({ disconnected: false, aborted: false });
+          }),
+      );
+    mockStatus.mockResolvedValue({ can_reconnect: true, status: 'running', run_id: 'run-A', active_tasks: [] });
+
+    let tid = 'th-A';
+    const { result, rerender } = renderHookWithProviders(() => useChatMessages('ws', tid));
+
+    await waitFor(() => expect(mockReconnect).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.isReconnecting).toBe(true));
+
+    // Navigate to B while A still streams → supersede A, start B's reconnect.
+    mockStatus.mockResolvedValue({ can_reconnect: true, status: 'running', run_id: 'run-B', active_tasks: [] });
+    tid = 'th-B';
+    await act(async () => {
+      rerender();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitFor(() => expect(mockReconnect).toHaveBeenCalledTimes(2));
+    // B is reconnecting now (it set the spinner after the supersede cleared it).
+    expect(result.current.isReconnecting).toBe(true);
+
+    // A's superseded reconnect unwinds. Its finally is guarded by stillActive
+    // (false post-supersede), so it must leave B's spinner on.
+    await act(async () => {
+      resolveA?.();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(result.current.isReconnecting).toBe(true);
+
+    resolveB?.();
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  });
 });

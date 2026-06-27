@@ -133,3 +133,62 @@ async def test_continuation_owner_mismatch_returns_thread_not_found():
     assert payload.get("success") is False, payload
     assert "thread not found" in payload.get("error", ""), payload
     dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_continuation_normalizes_noncanonical_thread_id():
+    """A non-canonical id (urn:uuid:) is normalized once so the owner check and
+    the fetch bind the same canonical form — the fetch can't 22P02 after the
+    owner check (which normalizes internally) has already passed."""
+    raw = f"urn:uuid:{PTC_THREAD_ID}"
+    owner = AsyncMock(return_value=USER_ID)
+    by_id = AsyncMock(return_value={
+        "conversation_thread_id": PTC_THREAD_ID,
+        "workspace_id": WORKSPACE_ID,
+    })
+
+    with patch(
+        "src.server.database.conversation.get_thread_owner_id", owner
+    ), patch(
+        "src.server.database.conversation.get_thread_by_id", by_id
+    ), patch(
+        "src.tools.secretary.tools._hitl_confirm", return_value=(True, {})
+    ), patch(
+        "aiohttp.ClientSession", return_value=_FakeSession(_FakeResp())
+    ):
+        result = await ptc_agent.ainvoke(
+            _tool_call({"question": "follow up please", "thread_id": raw}),
+            config=_config(),
+        )
+
+    payload = _payload(result)
+    assert payload.get("success") is True, payload
+    # Both lookups receive the canonical form, not the urn:uuid: input.
+    owner.assert_awaited_once_with(PTC_THREAD_ID)
+    by_id.assert_awaited_once_with(PTC_THREAD_ID)
+
+
+@pytest.mark.asyncio
+async def test_continuation_non_uuid_thread_id_short_circuits():
+    """A non-UUID id (e.g. an agent file/dir name) is rejected before any DB
+    lookup, so it can't reach get_thread_by_id and raise."""
+    owner = AsyncMock(return_value=USER_ID)
+    by_id = AsyncMock(return_value={})
+
+    with patch(
+        "src.server.database.conversation.get_thread_owner_id", owner
+    ), patch(
+        "src.server.database.conversation.get_thread_by_id", by_id
+    ), patch(
+        "src.tools.secretary.tools._hitl_confirm", return_value=(True, {})
+    ):
+        result = await ptc_agent.ainvoke(
+            _tool_call({"question": "follow up please", "thread_id": "results"}),
+            config=_config(),
+        )
+
+    payload = _payload(result)
+    assert payload.get("success") is False, payload
+    assert "thread not found" in payload.get("error", ""), payload
+    owner.assert_not_awaited()
+    by_id.assert_not_awaited()
