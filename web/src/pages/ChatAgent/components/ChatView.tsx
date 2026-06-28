@@ -871,8 +871,15 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
   const armSettleTimers = useCallback(() => {
     if (settleQuietTimerRef.current) clearTimeout(settleQuietTimerRef.current);
     settleQuietTimerRef.current = setTimeout(() => {
+      // Quiet window elapsed — the settle session is over. Tear down BOTH timers
+      // so the next pin session arms a fresh hard cap; otherwise it inherits this
+      // session's stale (shortened or already-elapsed) one and gives up early.
       pinTargetRef.current = null;
       settleQuietTimerRef.current = null;
+      if (settleHardCapRef.current) {
+        clearTimeout(settleHardCapRef.current);
+        settleHardCapRef.current = null;
+      }
     }, SETTLE_QUIET_MS);
     if (!settleHardCapRef.current) {
       settleHardCapRef.current = setTimeout(() => {

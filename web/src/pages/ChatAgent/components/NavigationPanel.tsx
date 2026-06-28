@@ -226,11 +226,14 @@ function NavigationPanel({
   }, [isActive, currentWorkspaceId, currentThreadId, workspaces, workspaceThreads, onLoadMoreThreads]);
 
   const toggleWorkspace = useCallback((wsId: string) => {
+    // Capture pre-toggle state: only an *expand* should lazy-load threads.
+    const wasExpanded = expandedWorkspaces.has(wsId);
     // Routed through the store so every collapse is traceable in one place.
     toggleWorkspaceExpansion(wsId);
-    // Lazy-load threads when expanding -- expandWorkspace is a no-op when data is
-    // already cached, so calling unconditionally is safe.
-    expandWorkspace(wsId);
+    // Lazy-load threads only when opening. expandWorkspace is a no-op when data
+    // is already cached, but the shared store is capped and can evict a list, so
+    // calling it on a collapse would fire a needless re-fetch.
+    if (!wasExpanded) expandWorkspace(wsId);
   }, [expandWorkspace]);
 
   const toggleThread = useCallback((threadId: string) => {
