@@ -31,6 +31,19 @@ vi.mock('../../api/client', () => ({
   setTokenGetter: vi.fn(),
 }));
 
+// Spy on the module-level nav stores so we can assert sign-out resets them.
+const mockResetNavPanelExpansion = vi.fn();
+const mockResetStableNavOrder = vi.fn();
+const mockResetSharedWorkspaceThreads = vi.fn();
+
+vi.mock('@/pages/ChatAgent/components/navExpansionStore', () => ({
+  resetNavPanelExpansion: () => mockResetNavPanelExpansion(),
+}));
+vi.mock('@/pages/ChatAgent/hooks/useNavigationData', () => ({
+  resetStableNavOrder: () => mockResetStableNavOrder(),
+  resetSharedWorkspaceThreads: () => mockResetSharedWorkspaceThreads(),
+}));
+
 // Dynamic import so mocks and env stubs are applied first
 const { AuthProvider, useAuth } = await import('../AuthContext');
 
@@ -144,6 +157,29 @@ describe('AuthContext', () => {
         expect(screen.getByTestId('isInitialized').textContent).toBe('true')
       );
       expect(mockOnAuthStateChange).toHaveBeenCalled();
+    });
+
+    // Regression: the module-level nav stores live on globalThis and survive
+    // logout (no page reload), so they must be reset on sign-out or one user's
+    // folders/thread lists leak into the next user's session on a shared tab.
+    it('resets the module-level nav stores on sign-out', async () => {
+      renderWithQueryClient(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      );
+
+      await waitFor(() => expect(mockOnAuthStateChange).toHaveBeenCalled());
+
+      const handler = mockOnAuthStateChange.mock.calls[0][0] as (
+        event: string,
+        session: unknown,
+      ) => void;
+      handler('SIGNED_OUT', null);
+
+      expect(mockResetNavPanelExpansion).toHaveBeenCalledTimes(1);
+      expect(mockResetStableNavOrder).toHaveBeenCalledTimes(1);
+      expect(mockResetSharedWorkspaceThreads).toHaveBeenCalledTimes(1);
     });
   });
 });
