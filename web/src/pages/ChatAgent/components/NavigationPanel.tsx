@@ -19,6 +19,7 @@ import {
   subscribeNavExpansion,
   getNavExpansionVersion,
   toggleWorkspaceExpansion,
+  toggleThreadExpansion,
 } from './navExpansionStore';
 import './NavigationPanel.css';
 
@@ -237,12 +238,7 @@ function NavigationPanel({
   }, [expandWorkspace]);
 
   const toggleThread = useCallback((threadId: string) => {
-    if (expandedThreads.has(threadId)) {
-      expandedThreads.delete(threadId);
-    } else {
-      expandedThreads.add(threadId);
-    }
-    notifyNavExpansion();
+    toggleThreadExpansion(threadId);
   }, []);
 
   // Inline workspace rename — the name span becomes a text input while editing.

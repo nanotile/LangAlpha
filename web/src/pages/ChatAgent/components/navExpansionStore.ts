@@ -60,13 +60,28 @@ export function toggleWorkspaceExpansion(workspaceId: string): void {
   notifyNavExpansion();
 }
 
-// Housekeeping mutators (reset on logout/teardown, forget on workspace delete)
-// don't notify subscribers: the change only needs to take effect on the next
-// mount, and any live re-render is already driven elsewhere (the delete path
-// invalidates the workspace list, which drops the row).
+// Toggle a thread's agent-group open/closed. Mirrors toggleWorkspaceExpansion so
+// both expansion mutations live in the store rather than half here, half inline.
+export function toggleThreadExpansion(threadId: string): void {
+  if (state.threads.has(threadId)) {
+    state.threads.delete(threadId);
+  } else {
+    state.threads.add(threadId);
+  }
+  notifyNavExpansion();
+}
+
+// Reset on logout/teardown. Bumps the version via notifyNavExpansion() like
+// every other mutator, so the store API stays uniform and no future caller has
+// to know this path is special. On logout the panel is already unmounted, so
+// the notify is a harmless no-op there (zero subscribers) — the consistency is
+// the point. forgetNavPanelExpansion (below) stays quiet by design: it runs
+// only on workspace delete, where the workspace-list invalidation already
+// repaints the affected row.
 export function resetNavPanelExpansion(): void {
   state.workspaces.clear();
   state.threads.clear();
+  notifyNavExpansion();
 }
 
 // Forget a deleted workspace so the mount-effect doesn't re-expand it (and fire
