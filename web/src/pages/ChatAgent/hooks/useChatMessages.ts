@@ -614,6 +614,14 @@ export function useChatMessages(
   // handler re-entry) doesn't append duplicate synthetic close events. Cleared
   // on the next send.
   const wasStoppedRef = useRef(false);
+  // Set by the foreground (visibilitychange/pageshow) handler when it aborts a
+  // likely-dead main stream on tab resume, so the stream's result handler
+  // re-kicks the existing reconnect instead of treating the abort as a user
+  // stop. Consumed (cleared) by the send/reconnect/HITL/checkpoint result
+  // sites; also reset at every stream entry point (alongside wasStoppedRef) so
+  // a stream type that doesn't consume it (e.g. steering) can't leak a stale
+  // flag into a later abort and mis-fire a reconnect onto the wrong turn.
+  const backgroundReconnectRef = useRef(false);
 
   // Refs for history loading state
   const historyLoadingRef = useRef(false);
@@ -755,6 +763,35 @@ export function useChatMessages(
       setStoredThreadId(workspaceId, threadId);
     }
   }, [workspaceId, threadId]);
+
+  // iOS Safari freezes a backgrounded tab and tears down its SSE socket; the
+  // frozen reader.read() may not reject promptly on return, hanging the turn.
+  // On foreground, if a main stream is genuinely active and reconnectable,
+  // abort the (likely dead) reader and flag it so the stream's result handler
+  // runs the existing reconnect rather than treating the abort as a user stop.
+  useEffect(() => {
+    const onForeground = () => {
+      if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+      if (!isLoading || !mainStreamAbortRef.current) return;        // nothing streaming
+      // Use the latched thread ref, not the threadId prop: a brand-new chat
+      // keeps the prop at '__default__' until the first SSE event updates the
+      // route, but Content-Location already latched the real thread into
+      // threadIdRef. Keying off the prop would skip recovery for the entire
+      // first-answer window (e.g. a PTC sandbox spin-up), which is the most
+      // common "ask, switch apps, come back" moment.
+      const tid = threadIdRef.current;
+      if (!tid || tid === '__default__') return;                    // no addressable run
+      if (!currentRunIdRef.current || wasStoppedRef.current) return; // not reconnectable / user stop
+      backgroundReconnectRef.current = true;
+      mainStreamAbortRef.current.abort();
+    };
+    document.addEventListener('visibilitychange', onForeground);
+    window.addEventListener('pageshow', onForeground);
+    return () => {
+      document.removeEventListener('visibilitychange', onForeground);
+      window.removeEventListener('pageshow', onForeground);
+    };
+  }, [isLoading, threadId]); // refs are stable
 
   // Reset thread ID when workspace or initialThreadId changes
   useEffect(() => {
@@ -2090,7 +2127,14 @@ export function useChatMessages(
    * Creates an assistant message placeholder and processes live SSE events.
    */
   const reconnectToStream = async ({ activeTasks = [], runId, resetCursor = false }: { activeTasks?: string[]; runId?: string | null; resetCursor?: boolean } = {}) => {
-    if (!threadId || threadId === '__default__') return;
+    // Reconnect targets the LATCHED thread, not the threadId prop. A brand-new
+    // chat keeps the prop at '__default__' until the first SSE event updates the
+    // route, but Content-Location already latched the real id into threadIdRef.
+    // Keying off the prop would bail this whole first-answer window (the most
+    // common "ask, background the tab, come back" moment). Snapshot once so the
+    // id stays stable across this single reconnect attempt.
+    const tid = threadIdRef.current;
+    if (!tid || tid === '__default__') return;
 
     // Callers that (re)attach to the thread's CURRENT active run — thread-load,
     // cross-thread navigation, post-HITL resume, report-back — pass that run's
@@ -2101,7 +2145,7 @@ export function useChatMessages(
     if (runId !== undefined) currentRunIdRef.current = runId;
     if (resetCursor) lastEventIdRef.current = null;
 
-    console.log('[Reconnect] Starting reconnection for thread:', threadId);
+    console.log('[Reconnect] Starting reconnection for thread:', tid);
 
     // Clear subagent cards to prevent duplicate content from cache + Redis overlap
     if (clearSubagentCards) {
@@ -2111,13 +2155,14 @@ export function useChatMessages(
 
     setIsLoading(true);
     setIsReconnecting(true);
-    acquireStreamOwnership(threadId);
+    acquireStreamOwnership(tid);
     // Fresh stream: clear any stale stop flag from a PRIOR turn (e.g. user
     // hard-stopped thread A, then switched to live thread B). Without this the
     // stop-during-reconnect guards below (result.aborted || wasStoppedRef) would
     // bail this legitimate reconnect and leave isLoading stuck. Matches the reset
     // every other stream entry point does (handleSendMessage, resume, steering).
     wasStoppedRef.current = false;
+    backgroundReconnectRef.current = false;
 
     // Create assistant message placeholder for reconnection
     const assistantMessageId = `assistant-reconnect-${Date.now()}`;
@@ -2250,14 +2295,20 @@ export function useChatMessages(
       // which create subagent cards with the correct description/type. Per-task streams
       // are opened AFTER so they merge into existing cards instead of creating empty ones.
       const result = await reconnectToWorkflowStream(
-        threadId,
+        tid,
         currentRunIdRef.current,
         lastEventIdRef.current as number | null,
         processEvent,
         abortController.signal,
       );
       // User stop aborted the reader — stopWorkflow owns teardown; bail.
+      // Exception: a foreground handler aborted this stream because the tab
+      // resumed (background abort, not a user stop) — re-kick the reconnect.
       if (result?.aborted || wasStoppedRef.current) {
+        if (backgroundReconnectRef.current && !wasStoppedRef.current) {
+          backgroundReconnectRef.current = false;
+          attemptReconnectAfterDisconnect(currentMessageRef.current || assistantMessageId);
+        }
         return;
       }
       if (result?.disconnected) {
@@ -2305,7 +2356,7 @@ export function useChatMessages(
       if (activeTasks.length > 0) {
         console.log('[Reconnect] Opening per-task streams for active tasks:', activeTasks);
         for (const taskId of activeTasks) {
-          openSubagentStream(threadId, taskId, processEvent);
+          openSubagentStream(tid, taskId, processEvent);
         }
       }
     } catch (err: unknown) {
@@ -2344,8 +2395,17 @@ export function useChatMessages(
       const stillActive = mainStreamAbortRef.current === abortController;
       // Skip cleanup on a user stop too — stopWorkflow already cleared isLoading /
       // hasActiveSubagents and ran finalize; re-running it here would re-toggle
-      // loading and re-open the report-back watch after the stop.
-      if (stillActive && !wasInterruptedRef.current && !wasStoppedRef.current) {
+      // loading and re-open the report-back watch after the stop. Also skip when
+      // this reconnect's own stream was aborted (a foreground re-kick on tab
+      // resume): the re-kicked reconnect, suspended at its getWorkflowStatus
+      // await, still owns mainStreamAbortRef, so cleaning up here would null the
+      // spinner mid-resume. The per-stream abort signal is the reliable guard.
+      if (
+        stillActive &&
+        !wasInterruptedRef.current &&
+        !wasStoppedRef.current &&
+        !abortController.signal.aborted
+      ) {
         cleanupAfterStreamEnd(assistantMessageId);
       }
       // Clear the spinner only if THIS reconnect still owns it. A newer reconnect
@@ -2374,15 +2434,22 @@ export function useChatMessages(
 
     setIsReconnecting(true);
 
+    // Target the latched thread, not the threadId prop: a first-turn disconnect
+    // (background during a brand-new chat's first answer) still has the prop at
+    // '__default__' while the real id lives in threadIdRef. Snapshot once so the
+    // ~31s retry loop stays pinned to the run we started reconnecting, matching
+    // the prior closure-captured semantics.
+    const tid = threadIdRef.current;
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      if (!threadId || threadId === '__default__') break;
+      if (!tid || tid === '__default__') break;
 
       if (attempt > 0) {
         await new Promise((r) => setTimeout(r, BASE_DELAY * Math.pow(2, attempt - 1)));
       }
 
       try {
-        const status = await getWorkflowStatus(threadId);
+        const status = await getWorkflowStatus(tid);
         if (!status.can_reconnect) {
           console.log('[Reconnect] Workflow no longer reconnectable, cleaning up');
           break;
@@ -4246,6 +4313,7 @@ export function useChatMessages(
       // This demoted POST is now the active main turn; clear the stopped guard
       // and register its controller so stopWorkflow can abort it.
       wasStoppedRef.current = false;
+      backgroundReconnectRef.current = false;
       mainStreamAbortRef.current = steeringAbort;
       const refs = {
         contentOrderCounterRef,
@@ -4262,7 +4330,7 @@ export function useChatMessages(
 
     try {
       // Send to same endpoint — backend will auto-accept steering and return steering_accepted SSE
-      await sendChatMessageStream(
+      const result = await sendChatMessageStream(
         message,
         workspaceId,
         threadId,
@@ -4323,8 +4391,32 @@ export function useChatMessages(
       if (mainStreamAbortRef.current === steeringAbort) {
         mainStreamAbortRef.current = null;
       }
-      // User hit stop on the demoted turn: stopWorkflow owns the teardown.
-      if (wasStoppedRef.current) {
+      // A background abort (foreground handler on tab resume) or a transport
+      // drop returns a result flag instead of throwing. This is the one steering
+      // sub-case the foreground handler can hit: once we demote to a real new
+      // turn, steeringAbort owns mainStreamAbortRef, so an abort here lands on a
+      // live backend turn. Re-kick the existing reconnect instead of finalizing
+      // it as truncated-complete. A user stop is owned by stopWorkflow.
+      if (result?.aborted || wasStoppedRef.current) {
+        const reconnectId = currentMessageRef.current || demotedAssistantId;
+        if (
+          demotedToNewTurn &&
+          backgroundReconnectRef.current &&
+          !wasStoppedRef.current &&
+          reconnectId
+        ) {
+          backgroundReconnectRef.current = false;
+          attemptReconnectAfterDisconnect(reconnectId);
+        }
+        return;
+      }
+      // Natural transport drop on the demoted turn: reconnect rather than
+      // finalizing — the turn may still be running on the backend.
+      if (result?.disconnected && demotedToNewTurn) {
+        const reconnectId = currentMessageRef.current || demotedAssistantId;
+        if (reconnectId) {
+          attemptReconnectAfterDisconnect(reconnectId);
+        }
         return;
       }
       if (demotedToNewTurn) {
@@ -4493,6 +4585,7 @@ export function useChatMessages(
     completedTaskIdsRef.current.clear();
     // Clear the stopped guard so a fresh send can finalize again on stop.
     wasStoppedRef.current = false;
+    backgroundReconnectRef.current = false;
     // Mark streaming as in progress (prevents history loading during streaming)
     // AND claim ownership for this thread, so navigating to another thread mid-send
     // supersedes this stream rather than leaving it orphaned (the load guard would
@@ -4572,8 +4665,14 @@ export function useChatMessages(
       );
 
       // The user hit stop: stopWorkflow already finalized the message and ran
-      // teardown. Skip reconnect/cleanup so we don't double-fire.
+      // teardown. Skip reconnect/cleanup so we don't double-fire. Exception: a
+      // foreground handler aborted this stream because the tab resumed
+      // (background abort, not a user stop) — re-kick the reconnect instead.
       if (result?.aborted || wasStoppedRef.current) {
+        if (backgroundReconnectRef.current && !wasStoppedRef.current) {
+          backgroundReconnectRef.current = false;
+          attemptReconnectAfterDisconnect(currentMessageRef.current || assistantMessageId);
+        }
         return;
       }
 
@@ -4740,6 +4839,7 @@ export function useChatMessages(
     setIsLoading(true);
     setMessageError(null);
     wasStoppedRef.current = false;
+    backgroundReconnectRef.current = false;
     acquireStreamOwnership(threadId);
     // Fresh AbortController so stopWorkflow can abort this resumed stream.
     const abortController = new AbortController();
@@ -4781,8 +4881,16 @@ export function useChatMessages(
         abortController.signal,
       );
 
-      // User hit stop: stopWorkflow already finalized + tore down.
+      // User hit stop: stopWorkflow already finalized + tore down. Exception: a
+      // foreground handler aborted this stream on tab resume (background abort,
+      // not a user stop) — treat it as a disconnect and re-kick the reconnect so
+      // the resumed-from-stop turn recovers instead of dying silently.
       if (result?.aborted || wasStoppedRef.current) {
+        if (backgroundReconnectRef.current && !wasStoppedRef.current) {
+          backgroundReconnectRef.current = false;
+          wasDisconnected = true;
+          attemptReconnectAfterDisconnect(assistantMessageId);
+        }
         return;
       }
 
@@ -5076,6 +5184,7 @@ export function useChatMessages(
     setHasActiveSubagents(false);
     completedTaskIdsRef.current.clear();
     wasStoppedRef.current = false;
+    backgroundReconnectRef.current = false;
     acquireStreamOwnership(threadId);
 
     // Truncate messages and add new user message (if editing) + assistant placeholder
@@ -5150,8 +5259,16 @@ export function useChatMessages(
         abortController.signal,
       );
 
-      // User hit stop: stopWorkflow already finalized + tore down.
+      // User hit stop: stopWorkflow already finalized + tore down. Exception: a
+      // foreground handler aborted this stream on tab resume (background abort,
+      // not a user stop) — treat it as a disconnect and re-kick the reconnect so
+      // the resumed turn recovers instead of dying silently.
       if (result?.aborted || wasStoppedRef.current) {
+        if (backgroundReconnectRef.current && !wasStoppedRef.current) {
+          backgroundReconnectRef.current = false;
+          wasDisconnected = true;
+          attemptReconnectAfterDisconnect(assistantMessageId);
+        }
         return;
       }
 

@@ -700,7 +700,7 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
     setIsCompacting,
     queuedSend,
     isLoadingHistory,
-    isReconnecting: _isReconnecting,
+    isReconnecting,
     messageError,
     returnedSteering,
     clearReturnedSteering,
@@ -2858,6 +2858,14 @@ function ChatView({ workspaceId, threadId, initialTaskId, onBack, workspaceName:
                     )}
                     {messageError && !isLoading && (
                       <ErrorBanner error={messageError} />
+                    )}
+                    {isReconnecting && (
+                      <div className="flex items-center gap-2 px-3 py-1.5 text-xs"
+                        role="status" aria-live="polite"
+                        style={{ color: 'var(--color-text-tertiary)' }}>
+                        <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" style={{ color: 'var(--color-accent-primary)' }} />
+                        {t('chat.reconnecting', 'Reconnecting…')}
+                      </div>
                     )}
                     {/* Tail mode: main turn finished but a dispatched subagent is
                         still running in the backend. Independent of stop. */}
