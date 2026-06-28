@@ -29,6 +29,7 @@ vi.mock('../../lib/supabase', () => ({
 
 vi.mock('../../api/client', () => ({
   setTokenGetter: vi.fn(),
+  setTokenRefresher: vi.fn(),
 }));
 
 // Spy on the module-level nav stores so we can assert sign-out resets them.
