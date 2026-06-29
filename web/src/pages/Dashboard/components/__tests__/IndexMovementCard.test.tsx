@@ -36,6 +36,14 @@ describe('IndexMovementCard', () => {
     expect(screen.queryByText('N/A')).not.toBeInTheDocument();
   });
 
+  it('renders the price when quoteAvailable is undefined (backward compat)', () => {
+    // Pre-existing IndexData has no quoteAvailable field; the `!== false`
+    // sentinel must treat undefined as "has quote" so old data still renders.
+    renderCard(baseIndex());
+    expect(screen.getByText(noGrouping('5000.12'))).toBeInTheDocument();
+    expect(screen.queryByText('N/A')).not.toBeInTheDocument();
+  });
+
   it('masks price and change as N/A when the quote is unavailable', () => {
     renderCard(
       baseIndex({ quoteAvailable: false, price: 0, change: 0, changePercent: 0 }),

@@ -100,6 +100,27 @@ describe('getIndex', () => {
     expect(result.price).toBe(101);
     // date label reflects the session the data belongs to, not "today".
     expect(result.asOfDate).toBe('2025-01-13');
+    // a positive close is a real quote.
+    expect(result.quoteAvailable).toBe(true);
+  });
+
+  it('marks the quote unavailable when the latest regular-hours close is non-positive', async () => {
+    // The session's last regular-hours bar has a 0 close (a partial/bad bar);
+    // price derives from it, so getIndex must flag the quote as unavailable for
+    // direct consumers instead of returning a real-looking 0.00.
+    apiMock.get.mockResolvedValueOnce({
+      data: {
+        data: [
+          { time: ET(2025, 0, 13, 9, 30), open: 100, close: 100 },
+          { time: ET(2025, 0, 13, 16, 0), open: 100, close: 0 },
+        ],
+      },
+    });
+
+    const result = await getIndex('VIX');
+
+    expect(result.quoteAvailable).toBe(false);
+    expect(result.price).toBe(0);
   });
 
   it('falls back to the chronologically-last bar when no regular-hours bars exist', async () => {
