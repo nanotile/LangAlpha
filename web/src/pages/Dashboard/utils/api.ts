@@ -4,6 +4,7 @@
  */
 import { api } from '@/api/client';
 import { utcMsToETDate, utcMsToETTime } from '@/lib/utils';
+import type { IndexData, SparklinePoint } from '@/types/market';
 import * as portfolioApi from './portfolio';
 import * as watchlistApi from './watchlist';
 import * as watchlistItemsApi from './watchlistItems';
@@ -17,24 +18,6 @@ interface IntradayPoint {
   high?: number;
   low?: number;
   volume?: number;
-}
-
-interface SparklinePoint {
-  time: string;
-  val: number;
-}
-
-interface IndexData {
-  symbol: string;
-  name: string;
-  price: number;
-  change: number;
-  changePercent: number;
-  isPositive: boolean;
-  sparklineData: SparklinePoint[];
-  quoteAvailable?: boolean;
-  asOfDate?: string;
-  previousClose?: number | null;
 }
 
 interface StockPrice {
@@ -167,6 +150,9 @@ export async function getIndex(symbol: string, _opts: Record<string, unknown> = 
       change: Math.round(change * 100) / 100,
       changePercent: Math.round(changePercent * 100) / 100,
       isPositive: change >= 0,
+      // Direct getIndex consumers get the same zero/invalid-close masking the
+      // dashboard applies via the snapshot: a non-positive close isn't a quote.
+      quoteAvailable: close > 0,
       asOfDate: latestDate,
       sparklineData: todayPoints
         .filter((p: IntradayPoint) => Number(p.close) > 0)
@@ -197,7 +183,7 @@ export async function getIndices(symbols: string[] = INDEX_SYMBOLS, _opts: Recor
         const result = await getIndex(norm);
         return { symbol: norm, sparklineData: result.sparklineData, asOfDate: result.asOfDate };
       } catch {
-        return { symbol: norm, sparklineData: [] as SparklinePoint[], asOfDate: undefined as string | undefined };
+        return { symbol: norm, sparklineData: [] as SparklinePoint[], asOfDate: undefined };
       }
     })),
   ]);
