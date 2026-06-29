@@ -5,6 +5,7 @@ import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts';
 import { motion, AnimatePresence, type PanInfo } from 'framer-motion';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { createFormatter } from '@/lib/format';
+import { utcMsToETDate } from '@/lib/utils';
 import type { IndexData } from '@/types/market';
 
 const fmt2 = createFormatter({ minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -46,14 +47,15 @@ function IndexCardContent({ index }: { index: IndexData }) {
   );
 
   // Show the date of the session the data belongs to (e.g. the last trading day
-  // when the market is closed/pre-open), falling back to today if unknown.
+  // when the market is closed/pre-open), falling back to today (ET) if unknown
+  // or malformed. ET — not browser-local — so the fallback matches the
+  // ET-derived asOfDate on sibling cards for users outside US timezones.
   const dateStr = (() => {
-    if (index.asOfDate) {
-      const [, mo, d] = index.asOfDate.split('-');
-      return `${Number(mo)}/${Number(d)}`;
-    }
-    const today = new Date();
-    return `${today.getMonth() + 1}/${today.getDate()}`;
+    const iso = /^\d{4}-\d{2}-\d{2}$/.test(index.asOfDate ?? '')
+      ? (index.asOfDate as string)
+      : utcMsToETDate(Date.now());
+    const [, mo, d] = iso.split('-');
+    return `${Number(mo)}/${Number(d)}`;
   })();
 
   return (
@@ -106,7 +108,11 @@ function IndexCardContent({ index }: { index: IndexData }) {
               <Line
                 type="monotone"
                 dataKey="val"
-                stroke={pos ? 'var(--color-profit)' : 'var(--color-loss)'}
+                stroke={
+                  hasQuote
+                    ? pos ? 'var(--color-profit)' : 'var(--color-loss)'
+                    : 'var(--color-text-secondary)'
+                }
                 strokeWidth={1.5}
                 dot={false}
                 isAnimationActive={false}

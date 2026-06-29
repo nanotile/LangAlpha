@@ -212,7 +212,11 @@ export async function getIndices(symbols: string[] = INDEX_SYMBOLS, _opts: Recor
   let failedCount = 0;
   const indices: IndexData[] = list.map((norm: string) => {
     const snap = snapshotMap[norm];
-    if (snap && snap.price != null) {
+    // Index prices are never legitimately 0; a zero/negative price means a
+    // partial provider snapshot (e.g. yfinance coercing a missing lastPrice to
+    // 0). Treat it as no quote so the card renders N/A instead of a fake
+    // "0.00 / +0.00%" — the same symptom #287 set out to kill.
+    if (snap && snap.price != null && snap.price > 0) {
       const change = snap.change ?? 0;
       const changePct = snap.change_percent ?? (snap.previous_close ? ((change / snap.previous_close) * 100) : 0);
       return {
