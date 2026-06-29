@@ -15,6 +15,7 @@ export interface IndexData {
   changePercent: number;
   isPositive: boolean;
   sparklineData: SparklinePoint[];
+  quoteAvailable?: boolean;
   previousClose?: number | null;
 }
 

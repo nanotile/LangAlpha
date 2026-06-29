@@ -32,6 +32,7 @@ interface IndexData {
   changePercent: number;
   isPositive: boolean;
   sparklineData: SparklinePoint[];
+  quoteAvailable?: boolean;
   previousClose?: number | null;
 }
 
@@ -111,6 +112,7 @@ function fallbackIndex(norm: string): IndexData {
     changePercent: 0,
     isPositive: true,
     sparklineData: [],
+    quoteAvailable: false,
   };
 }
 
@@ -133,13 +135,21 @@ export async function getIndex(symbol: string, _opts: Record<string, unknown> = 
     // Sort ascending by time (Unix ms)
     const sorted = [...pts].sort((a: IntradayPoint, b: IntradayPoint) => a.time - b.time);
 
-    // Isolate the most recent trading day, regular hours only (9:30–16:00)
-    const latestDate = utcMsToETDate(sorted[sorted.length - 1].time);
-    const todayPoints = sorted.filter((p: IntradayPoint) => {
-      if (utcMsToETDate(p.time) !== latestDate) return false;
+    // Isolate regular-hours points (9:30–16:00 ET) first, then take the most
+    // recent date that actually has them. Some indices (e.g. VIX) carry
+    // overnight/pre-market bars, so the chronologically-last bar's date can have
+    // zero regular-hours points on a pre-open day — which would blank the
+    // sparkline. `sorted` is ascending, so the regular-hours slice is too.
+    const regularHours = sorted.filter((p: IntradayPoint) => {
       const t = utcMsToETTime(p.time);
       return t >= '09:30' && t <= '16:00';
     });
+    const latestDate = regularHours.length
+      ? utcMsToETDate(regularHours[regularHours.length - 1].time)
+      : utcMsToETDate(sorted[sorted.length - 1].time);
+    const todayPoints = regularHours.length
+      ? regularHours.filter((p: IntradayPoint) => utcMsToETDate(p.time) === latestDate)
+      : sorted.filter((p: IntradayPoint) => utcMsToETDate(p.time) === latestDate);
 
     const oldest = todayPoints[0];
     const mostRecent = todayPoints[todayPoints.length - 1];
@@ -211,6 +221,7 @@ export async function getIndices(symbols: string[] = INDEX_SYMBOLS, _opts: Recor
         isPositive: change >= 0,
         previousClose: snap.previous_close ?? null,
         sparklineData: sparklineMap[norm] || [],
+        quoteAvailable: true,
       };
     }
     failedCount++;

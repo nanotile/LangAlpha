@@ -366,6 +366,23 @@ class TestMarketDataProvider:
         assert "market_data.snapshot.drop_unrequested" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_get_snapshots_keeps_caret_prefixed_index_symbol(self, caplog):
+        # A provider that echoes the Yahoo caret form ("^GSPC") for a bare
+        # requested index symbol ("GSPC") must be matched, not dropped —
+        # normalize_symbol strips the caret. Regression for the index-card
+        # 0.00 bug (#287).
+        src = SnapshotSource(
+            "caret",
+            extra_rows=[{"symbol": "^GSPC", "price": 5000.0}],
+        )
+        provider = MarketDataProvider([ProviderEntry("caret", src, {"all"})])
+
+        result = await provider.get_snapshots(["GSPC"], asset_type="indices")
+
+        assert result == [{"symbol": "^GSPC", "price": 5000.0}]
+        assert "market_data.snapshot.drop_unrequested" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_get_snapshots_falls_back_when_provider_returns_no_rows(self):
         empty_src = SnapshotSource("primary")
         fallback_src = SnapshotSource(

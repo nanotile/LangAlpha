@@ -221,7 +221,10 @@ class MarketDataProvider:
     ) -> list[dict[str, Any]]:
         """Fetch batch snapshots with per-symbol market routing and fallback."""
         def normalize_symbol(value: Any) -> str:
-            return str(value).strip().upper()
+            # lstrip("^") so a provider returning the Yahoo caret form ("^GSPC")
+            # still matches the bare requested index symbol ("GSPC"). Request
+            # symbols are caret-free, so this is a no-op for them.
+            return str(value).strip().upper().lstrip("^")
 
         pending = [s for s in symbols if str(s).strip()]
         if not pending:

@@ -35,6 +35,7 @@ interface IndexMovementCardProps {
 
 function IndexCardContent({ index }: { index: IndexData }) {
   useTranslation();
+  const hasQuote = index.quoteAvailable !== false;
   const pos = index.isPositive;
   const ch = Number(index.change);
   const pct = Number(index.changePercent);
@@ -73,13 +74,17 @@ function IndexCardContent({ index }: { index: IndexData }) {
               className="text-lg font-bold tracking-tight dashboard-mono"
               style={{ color: 'var(--color-text-primary)' }}
             >
-              {fmt2(Number(index.price))}
+              {hasQuote ? fmt2(Number(index.price)) : 'N/A'}
             </div>
             <div
               className="text-xs dashboard-mono"
-              style={{ color: pos ? 'var(--color-profit)' : 'var(--color-loss)' }}
+              style={{
+                color: hasQuote
+                  ? pos ? 'var(--color-profit)' : 'var(--color-loss)'
+                  : 'var(--color-text-secondary)',
+              }}
             >
-              {changeStr} {pctStr}
+              {hasQuote ? `${changeStr} ${pctStr}` : 'N/A'}
             </div>
           </div>
         </div>
