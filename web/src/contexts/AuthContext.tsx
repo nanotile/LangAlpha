@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
-import { setTokenGetter } from '../api/client';
+import { setTokenGetter, setTokenRefresher } from '../api/client';
 import { queryKeys } from '../lib/queryKeys';
 import { OAUTH_BROADCAST_CHANNEL, OAUTH_POPUP_WINDOW_NAME, OAUTH_POPUP_FEATURES } from '../lib/oauthPopup';
 import { clearFlashWorkspaceCache } from '@/pages/MarketView/utils/flashWorkspace';
@@ -67,6 +67,9 @@ function SupabaseAuthProvider({ children }: { children: React.ReactNode }) {
   const wireTokenGetter = useCallback(() => {
     setTokenGetter(() =>
       sb.auth.getSession().then((r) => r.data.session?.access_token ?? null)
+    );
+    setTokenRefresher(() =>
+      sb.auth.refreshSession().then((r) => r.data.session?.access_token ?? null)
     );
   }, [sb]);
 
@@ -151,6 +154,7 @@ function SupabaseAuthProvider({ children }: { children: React.ReactNode }) {
         resetStableNavOrder();
         resetSharedWorkspaceThreads();
         setTokenGetter(() => Promise.resolve(null));
+        setTokenRefresher(() => Promise.resolve(null));
       }
     });
 
