@@ -22,8 +22,8 @@ from ptc_agent.agent.middleware.compaction.types import (
 )
 from ptc_agent.agent.middleware.compaction.utils import (
     DEFAULT_SUMMARY_PROMPT,
+    build_compaction_event,
     build_summary_message,
-    compute_absolute_cutoff,
     count_tokens_tiktoken,
     get_effective_messages,
     truncate_message_args,
@@ -226,15 +226,18 @@ async def compact_messages(
     # Build summary message using shared utility
     summary_message = build_summary_message(summary_text, file_path)
 
-    # Compute absolute cutoff for chaining
-    absolute_cutoff = compute_absolute_cutoff(cutoff_index, previous_event)
+    # Build the event with an id anchor (cutoff grounded in the raw list)
+    event = build_compaction_event(
+        raw_messages=messages,
+        preserved_messages=preserved,
+        summary_message=summary_message,
+        file_path=file_path,
+        effective_cutoff=cutoff_index,
+        previous_event=previous_event,
+    )
 
     return {
-        "event": CompactionEvent(
-            cutoff_index=absolute_cutoff,
-            summary_message=summary_message,
-            file_path=file_path,
-        ),
+        "event": event,
         "summary_text": summary_text,
         "original_count": len(effective),
         "preserved_count": len(preserved) + 1,  # +1 for summary message

@@ -499,6 +499,79 @@ def truncate_read_results(
 # =============================================================================
 
 
+def _message_id(message: Any) -> str | None:
+    """Framework-assigned id of a checkpoint message (object ``.id`` or dict ``id``)."""
+    mid = getattr(message, "id", None)
+    if mid is None and isinstance(message, dict):
+        mid = message.get("id")
+    return mid
+
+
+def _strip_leading_orphan_tool_messages(
+    tail: list[AnyMessage],
+) -> list[AnyMessage]:
+    """Drop leading ``ToolMessage``s from a reconstructed tail.
+
+    A summary message followed by a ``ToolMessage`` reconstructs into an
+    Anthropic ``user`` turn whose first content block is an orphaned
+    ``tool_result`` (no preceding ``tool_use``) -> 400. Stripping any leading
+    tool results makes that structurally impossible. Plain-dict messages are
+    left untouched (``isinstance`` is ``False``); they never carry the orphan.
+    """
+    i = 0
+    while i < len(tail) and isinstance(tail[i], ToolMessage):
+        i += 1
+    return tail[i:] if i else tail
+
+
+def _resolve_anchor_index(
+    messages: list[AnyMessage], anchor_id: str | None
+) -> int | None:
+    """Index of the message whose id equals ``anchor_id``, or ``None``.
+
+    Returns ``None`` immediately when ``anchor_id`` is ``None`` (legacy event)
+    so it can never match an id-less message.
+    """
+    if anchor_id is None:
+        return None
+    for i, msg in enumerate(messages):
+        if _message_id(msg) == anchor_id:
+            return i
+    return None
+
+
+def build_compaction_event(
+    raw_messages: list[AnyMessage],
+    preserved_messages: list[AnyMessage],
+    summary_message: HumanMessage,
+    file_path: str | None,
+    effective_cutoff: int,
+    previous_event: CompactionEvent | None,
+) -> CompactionEvent:
+    """Construct a ``CompactionEvent`` carrying both a positional cutoff and an id anchor.
+
+    The positional ``cutoff_index`` is grounded in ``raw_messages`` by locating
+    the first preserved message's id, falling back to the arithmetic
+    ``compute_absolute_cutoff`` when the anchor is absent (empty preserved tail).
+    ``anchor_message_id`` lets reconstruction re-find the boundary by id if the
+    raw list later drifts.
+    """
+    anchor_message_id = (
+        _message_id(preserved_messages[0]) if preserved_messages else None
+    )
+
+    cutoff_index: int | None = _resolve_anchor_index(raw_messages, anchor_message_id)
+    if cutoff_index is None:
+        cutoff_index = compute_absolute_cutoff(effective_cutoff, previous_event)
+
+    return CompactionEvent(
+        cutoff_index=cutoff_index,
+        summary_message=summary_message,
+        file_path=file_path,
+        anchor_message_id=anchor_message_id,
+    )
+
+
 def get_effective_messages(
     messages: list[AnyMessage],
     event: CompactionEvent | None,
@@ -507,7 +580,14 @@ def get_effective_messages(
 
     After compaction, the checkpoint still contains ALL messages. This function
     reconstructs what the model should see: the summary message plus messages
-    after the cutoff index.
+    after the cutoff boundary.
+
+    The boundary is tracked by ``anchor_message_id`` (the first preserved
+    message's id) and re-resolved against the current list only when the stored
+    positional ``cutoff_index`` no longer points at that anchor — so list
+    perturbation (DeltaChannel reconstruction, injected messages) can't silently
+    drift the boundary. Any leading orphaned ``ToolMessage`` in the tail is
+    stripped unconditionally as a crash backstop.
 
     Args:
         messages: Full message list from state.
@@ -519,9 +599,19 @@ def get_effective_messages(
     if event is None:
         return messages
 
-    result: list[AnyMessage] = [event["summary_message"]]
-    result.extend(messages[event["cutoff_index"]:])
-    return result
+    cutoff = event["cutoff_index"]
+    anchor_id = event.get("anchor_message_id")
+    # O(1) happy path: only re-scan when the positional cutoff has drifted off
+    # the anchor. Legacy events (no anchor) keep the positional index as-is.
+    if anchor_id is not None and not (
+        0 <= cutoff < len(messages) and _message_id(messages[cutoff]) == anchor_id
+    ):
+        resolved = _resolve_anchor_index(messages, anchor_id)
+        if resolved is not None:
+            cutoff = resolved
+
+    tail = _strip_leading_orphan_tool_messages(messages[cutoff:])
+    return [event["summary_message"], *tail]
 
 
 def compute_absolute_cutoff(

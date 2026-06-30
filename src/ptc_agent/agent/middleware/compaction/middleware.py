@@ -53,8 +53,8 @@ from ptc_agent.agent.middleware.compaction.types import (
 )
 from ptc_agent.agent.middleware.compaction.utils import (
     DEFAULT_SUMMARY_PROMPT,
+    build_compaction_event,
     build_summary_message,
-    compute_absolute_cutoff,
     count_tokens_tiktoken,
     get_effective_messages,
     strip_base64_from_messages,
@@ -419,15 +419,15 @@ class CompactionMiddleware(AgentMiddleware):
         # Build summary message
         summary_message = self._build_summary_message(summary, file_path)
 
-        # Compute absolute cutoff for chained summarization tracking
-        state_cutoff_index = self._compute_absolute_cutoff(cutoff_index, previous_event)
-
-        # Create summarization event for state
-        new_event: CompactionEvent = {
-            "cutoff_index": state_cutoff_index,
-            "summary_message": summary_message,
-            "file_path": file_path,
-        }
+        # Create summarization event with an id anchor (cutoff grounded in raw list)
+        new_event = build_compaction_event(
+            raw_messages=request.messages,
+            preserved_messages=preserved_messages,
+            summary_message=summary_message,
+            file_path=file_path,
+            effective_cutoff=cutoff_index,
+            previous_event=previous_event,
+        )
 
         # Call handler with summarized messages
         modified_messages = [summary_message, *preserved_messages]
@@ -588,13 +588,15 @@ class CompactionMiddleware(AgentMiddleware):
             messages_to_summarize, original_count=len(truncated_messages)
         )
         summary_message = self._build_summary_message(summary, file_path)
-        state_cutoff_index = self._compute_absolute_cutoff(cutoff_index, previous_event)
 
-        new_event: CompactionEvent = {
-            "cutoff_index": state_cutoff_index,
-            "summary_message": summary_message,
-            "file_path": file_path,
-        }
+        new_event = build_compaction_event(
+            raw_messages=request.messages,
+            preserved_messages=preserved_messages,
+            summary_message=summary_message,
+            file_path=file_path,
+            effective_cutoff=cutoff_index,
+            previous_event=previous_event,
+        )
 
         modified_messages = [summary_message, *preserved_messages]
         response = handler(request.override(messages=modified_messages))
@@ -630,14 +632,6 @@ class CompactionMiddleware(AgentMiddleware):
     ) -> list[AnyMessage]:
         """Delegate to shared utility."""
         return get_effective_messages(messages, event)
-
-    @staticmethod
-    def _compute_absolute_cutoff(
-        effective_cutoff: int,
-        previous_event: CompactionEvent | None,
-    ) -> int:
-        """Delegate to shared utility."""
-        return compute_absolute_cutoff(effective_cutoff, previous_event)
 
     # =========================================================================
     # Token cache management
