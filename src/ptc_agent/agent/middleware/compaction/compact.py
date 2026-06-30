@@ -5,9 +5,8 @@ import logging
 import uuid
 from typing import Any, cast
 
-from langchain_core.messages import AnyMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.messages.utils import trim_messages
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from langchain.chat_models import BaseChatModel
 
@@ -272,7 +271,8 @@ async def offload_tool_args(
 
     Returns:
         Dict with:
-        - "messages": The full message list with offloaded content (for aupdate_state)
+        - "messages": Only the changed messages, keyed by their existing ids, for
+          an in-place ``aupdate_state`` overwrite (NOT a REMOVE_ALL full rewrite)
         - "offloaded_args": Number of tool call args offloaded (Write/Edit/ExecuteCode)
         - "offloaded_reads": Number of Read results offloaded (duplicates + non-critical)
         - "original_count": Total message count (unchanged)
@@ -284,10 +284,15 @@ async def offload_tool_args(
     if not messages:
         raise ValueError("No messages to offload")
 
-    # Ensure all messages have IDs
+    # Ensure all messages have IDs, then snapshot the list so we can detect which
+    # messages truncation actually changed. The truncate_* helpers preserve order
+    # and length, returning the SAME object for unchanged messages and a
+    # model_copy (same id) for changed ones, so an identity diff isolates the
+    # changes.
     for msg in messages:
         if msg.id is None:
             msg.id = str(uuid.uuid4())
+    original_messages = list(messages)
 
     config = (compaction_config or CompactionConfig()).model_dump()
 
@@ -335,8 +340,21 @@ async def offload_tool_args(
     if originals and backend is not None:
         await aoffload_truncated_args(backend, originals)
 
+    # Return ONLY the messages truncation actually changed, keyed by their
+    # existing ids, so the DeltaChannel reducer overwrites them in place. A
+    # blanket REMOVE_ALL + full-list rewrite would, if it ran concurrently with a
+    # live turn (e.g. an offload during a Redis outage that bypassed the admission
+    # gate), rebuild from a stale snapshot and silently wipe messages appended in
+    # between. In-place id-keyed writes leave concurrently-appended messages
+    # untouched.
+    changed = [
+        msg
+        for original, msg in zip(original_messages, messages)
+        if msg is not original
+    ]
+
     return {
-        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages],
+        "messages": changed,
         "offloaded_args": len(originals),
         "offloaded_reads": len(read_ids),
         "original_count": len(messages),
