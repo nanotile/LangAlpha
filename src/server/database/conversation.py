@@ -91,9 +91,9 @@ def get_db_connection_string() -> str:
     db_port = os.getenv("DB_PORT", "5432")
     db_name = os.getenv("DB_NAME", "postgres")
     db_user = os.getenv("DB_USER", "postgres")
-    db_password = os.getenv("DB_PASSWORD", "postgres")
+    db_password = os.getenv("DB_PASSWORD", "")
 
-    sslmode = "require" if "supabase.com" in db_host else "disable"
+    sslmode = os.getenv("DB_SSLMODE", "require")
     return f"postgresql://{quote_plus(db_user)}:{quote_plus(db_password)}@{db_host}:{db_port}/{db_name}?sslmode={sslmode}"
 
 
@@ -286,9 +286,9 @@ async def calculate_next_thread_index(workspace_id: str, conn=None) -> int:
                     result = await cur.fetchone()
                     return result["next_index"]
 
-    except Exception as e:
-        logger.error(f"Error calculating thread index: {e}")
-        return 0
+    except Exception:
+        logger.exception("Error calculating thread index")
+        raise
 
 
 async def create_thread(

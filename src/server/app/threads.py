@@ -302,7 +302,7 @@ async def list_threads(
         logger.exception(f"Error listing threads: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list threads: {str(e)}",
+            detail="Failed to list threads",
         )
 
 
@@ -359,7 +359,7 @@ async def delete_thread_endpoint(thread_id: str, x_user_id: CurrentUserId):
     except Exception as e:
         logger.exception(f"Error deleting thread {thread_id}: {e}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to delete thread: {str(e)}"
+            status_code=500, detail="Failed to delete thread"
         )
 
 
@@ -393,7 +393,7 @@ async def update_thread_endpoint(
     except Exception as e:
         logger.exception(f"Error updating thread {thread_id}: {e}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to update thread: {str(e)}"
+            status_code=500, detail="Failed to update thread"
         )
 
 
@@ -815,7 +815,7 @@ async def reconnect_to_stream(
             raise
         except Exception as e:
             logger.error(f"[PTC_RECONNECT] Error: {e}", exc_info=True)
-            yield f'event: error\ndata: {{"error": "Reconnection failed: {str(e)}"}}\n\n'
+            yield f'event: error\ndata: {{"error": "Reconnection failed"}}\n\n'
 
     return StreamingResponse(
         stream_reconnection(),
@@ -986,7 +986,7 @@ async def replay_thread_messages(thread_id: str, x_user_id: CurrentUserId):
     except Exception as e:
         logger.exception(f"Error replaying thread {thread_id}: {e}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to replay thread: {str(e)}"
+            status_code=500, detail="Failed to replay thread"
         )
 
 

@@ -16,11 +16,11 @@ services:
       - langalpha-postgresql-data:/var/lib/postgresql
     environment:
       PGDATA: /var/lib/postgresql/data
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
-      POSTGRES_DB: ${DB_NAME:-postgres}
+      POSTGRES_USER: ${DB_USER:?DB_USER is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: ${DB_NAME:-langalpha}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -32,11 +32,11 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - langalpha-redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -62,7 +62,7 @@ services:
       # Default to Docker service names for inter-container networking.
       # Override in .env to connect to external services or for host dev.
       DB_HOST: ${DB_HOST:-postgres}
-      REDIS_URL: "${REDIS_URL:-redis://:${REDIS_PASSWORD:-redis}@redis:6379/0}"
+      REDIS_URL: "${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}"
     volumes:
       # Mount source for hot-reload
       - ./src:/app/src

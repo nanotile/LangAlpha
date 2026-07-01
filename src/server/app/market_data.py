@@ -146,7 +146,7 @@ async def get_stock_intraday(
         raise
     except Exception as e:
         logger.error(f"Error fetching stock intraday data for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch intraday data")
 
 
 # =============================================================================
@@ -173,7 +173,7 @@ async def get_stock_daily(
         raise
     except Exception as e:
         logger.error(f"Error fetching daily stock data for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch daily data")
 
 
 @router.get(
@@ -195,7 +195,7 @@ async def get_index_daily(
         raise
     except Exception as e:
         logger.error(f"Error fetching daily index data for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch daily data")
 
 
 # =============================================================================
@@ -254,7 +254,7 @@ async def get_batch_stocks_intraday(
         raise
     except Exception as e:
         logger.error(f"Error fetching batch stock intraday data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch batch intraday data")
 
 
 # =============================================================================
@@ -319,7 +319,7 @@ async def get_index_intraday(
         raise
     except Exception as e:
         logger.error(f"Error fetching index intraday data for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch intraday data")
 
 
 # =============================================================================
@@ -378,7 +378,7 @@ async def get_batch_indexes_intraday(
         raise
     except Exception as e:
         logger.error(f"Error fetching batch index intraday data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch batch intraday data")
 
 
 # =============================================================================
@@ -457,7 +457,7 @@ async def search_stocks(
         raise
     except Exception as e:
         logger.error(f"Error searching stocks for query '{query}': {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to search stocks: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to search stocks")
 
 
 # =============================================================================
@@ -510,7 +510,7 @@ async def get_company_overview(symbol: str, user_id: CurrentUserId) -> CompanyOv
         raise
     except Exception as e:
         logger.error(f"Error fetching company overview for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch company overview: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch company overview")
 
 
 # =============================================================================
@@ -606,7 +606,7 @@ async def get_analyst_data(
         raise
     except Exception as e:
         logger.error(f"Error fetching analyst data for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch analyst data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch analyst data")
 
 
 # =============================================================================
@@ -677,7 +677,7 @@ async def _get_batch_snapshots(
         raise
     except Exception as e:
         logger.error("Error fetching %s snapshots: %s", asset_type, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch snapshots")
 
 
 @router.get(
@@ -715,7 +715,7 @@ async def get_single_stock_snapshot(symbol: str, user_id: CurrentUserId) -> Snap
         raise
     except Exception as e:
         logger.error(f"Error fetching snapshot for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch snapshot")
 
 
 # =============================================================================
@@ -772,4 +772,4 @@ async def get_market_status(user_id: CurrentUserId) -> MarketStatusResponse:
         raise
     except Exception as e:
         logger.error(f"Error fetching market status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch market status")

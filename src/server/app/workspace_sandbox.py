@@ -508,7 +508,7 @@ async def install_sandbox_packages(
             success=False,
             installed=[],
             output="",
-            error=str(e),
+            error="Package installation failed",
         )
 
 

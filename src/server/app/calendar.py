@@ -70,7 +70,7 @@ async def get_economic_calendar(
         raise
     except Exception as e:
         logger.error("Error fetching economic calendar: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch economic calendar")
 
 
 @router.get("/earnings", response_model=EarningsCalendarResponse)
@@ -117,4 +117,4 @@ async def get_earnings_calendar(
         raise
     except Exception as e:
         logger.error("Error fetching earnings calendar: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch earnings calendar")

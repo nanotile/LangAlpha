@@ -42,7 +42,7 @@ async def health_check():
         if checkpointer_health.get("status") == "unhealthy":
             result["status"] = "degraded"
     except Exception as e:
-        result["checkpointer"] = {"status": "error", "error": str(e)}
+        result["checkpointer"] = {"status": "error", "error": "Health check failed"}
         result["status"] = "degraded"
 
     return result
