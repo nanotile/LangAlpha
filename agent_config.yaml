@@ -7,10 +7,10 @@
 
 llm:
   # Model name from src/llms/manifest/models.json
-  name: "qwen3.5-plus"
-  flash: "qwen3.6-flash"
-  compaction: "qwen3.6-flash" # defaults to flash model
-  fetch: "qwen3.6-flash"         # defaults to flash model
+  name: "claude-opus-4-8"
+  flash: "claude-sonnet-4-6-oauth"
+  compaction: "claude-sonnet-4-6-oauth" # defaults to flash model
+  fetch: "claude-sonnet-4-6-oauth"         # defaults to flash model
   fallback:
     - "kimi-k2.5"
     - "minimax-m3"
@@ -235,7 +235,7 @@ storage:
   # Cloud storage provider for image/chart/file uploads and avator
   # All credentials and settings are loaded from .env file
   # Options: s3, r2, oss, none (to disable uploads)
-  provider: "s3"
+  provider: "r2"
 
 logging:
   # Logging configuration

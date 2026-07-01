@@ -138,12 +138,25 @@ async def lifespan(app: FastAPI):
             "All endpoints are accessible without a token. "
             "Set HOST_MODE=platform for production use."
         )
-    if os.getenv("BYOK_ENCRYPTION_KEY") == "langalpha-local-dev-encryption-key":
+    _enc_key = os.getenv("BYOK_ENCRYPTION_KEY", "")
+    if _enc_key == "langalpha-local-dev-encryption-key":
+        if HOST_MODE == "platform":
+            raise RuntimeError(
+                "BYOK_ENCRYPTION_KEY is the publicly known default — refusing to start "
+                "in platform mode. Set a unique key: "
+                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
         logger.warning(
             "BYOK_ENCRYPTION_KEY is set to the default value from the repository. "
             "User API keys are encrypted with a publicly known key. "
             "Run `make config` or set a unique BYOK_ENCRYPTION_KEY."
         )
+    elif not _enc_key:
+        if HOST_MODE == "platform":
+            raise RuntimeError(
+                "BYOK_ENCRYPTION_KEY is not set — refusing to start in platform mode. "
+                "Generate one: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
 
     # Initialize and open conversation database pool
     from src.server.database.conversation import get_or_create_pool
@@ -697,11 +710,20 @@ app.add_middleware(RequestIDMiddleware)
 # Allowed origins loaded from config.yaml
 allowed_origins = get_allowed_origins()
 
+if "*" in allowed_origins:
+    logger.error(
+        "CORS: wildcard '*' in allowed_origins is unsafe with allow_credentials=True "
+        "— any website could make credentialed cross-origin requests. "
+        "Falling back to ['http://localhost:5173']. "
+        "Set explicit origins in config.yaml."
+    )
+    allowed_origins = ["http://localhost:5173", "http://localhost:3000"]
+
 logger.info(f"Allowed origins: {allowed_origins}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,  # Restrict to specific origins
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=[
         "GET",
@@ -710,8 +732,8 @@ app.add_middleware(
         "PATCH",
         "DELETE",
         "OPTIONS",
-    ],  # Use the configured list of methods
-    allow_headers=["*"],  # Now allow all headers, but can be restricted further
+    ],
+    allow_headers=["*"],
 )
 
 

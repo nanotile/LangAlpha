@@ -4,6 +4,7 @@ Server script
 
 import argparse
 import logging
+import os
 import uvicorn
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,15 @@ if __name__ == "__main__":
         help="Port to bind the server to (default: 8000)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.getenv("UVICORN_WORKERS", "1")),
+        help="Number of uvicorn worker processes (default: 1, or UVICORN_WORKERS env var). "
+             "Values >1 require that in-process singletons (WorkspaceManager, "
+             "BackgroundTaskManager, SessionService) have their shared state moved to "
+             "Redis. Until that refactor, use 1 for correctness.",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="info",
@@ -41,7 +51,6 @@ if __name__ == "__main__":
     # Configure SSE event logger independently
     # This allows viewing ONLY SSE events by setting SSE_EVENT_LOG_LEVEL=info
     # and server --log-level=error
-    import os
     sse_event_log_level = os.getenv("SSE_EVENT_LOG_LEVEL", "info").upper()
     sse_logger = logging.getLogger("sse_events")
     sse_logger.setLevel(getattr(logging, sse_event_log_level))
@@ -59,12 +68,24 @@ if __name__ == "__main__":
     if args.reload:
         reload = True
 
+    workers = args.workers
+    if reload and workers > 1:
+        logger.warning("--reload is incompatible with --workers > 1, forcing workers=1")
+        workers = 1
+
+    if workers == 1:
+        logger.info(
+            "Running with 1 worker. For production throughput, set --workers or "
+            "UVICORN_WORKERS (requires singleton state refactor — see EVALUATE_REPORT.md)."
+        )
+
     try:
-        logger.info(f"Starting server on {args.host}:{args.port}")
+        logger.info(f"Starting server on {args.host}:{args.port} (workers={workers})")
         uvicorn.run(
             "src.server.app:app",
             host=args.host,
             port=args.port,
+            workers=workers,
             reload=reload,
             log_level=args.log_level,
             timeout_keep_alive=300,  # 5 minutes - for long-running workflows

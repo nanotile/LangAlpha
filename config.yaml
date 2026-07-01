@@ -46,8 +46,13 @@ module_log_levels:
   src.deep_research: INFO
 
 # CORS Settings
+# List explicit origins — wildcard "*" is rejected when allow_credentials=True.
+# Add your frontend URL(s) here. Examples:
+#   - "https://app.yoursite.com"
+#   - "http://localhost:3000"
 allowed_origins:
-  - "*"
+  - "http://localhost:5173"
+  - "http://localhost:3000"
 
 
 # =============================================================================
