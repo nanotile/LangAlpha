@@ -203,14 +203,16 @@ async def test_update_thread_title_not_found(mock_db_connection, mock_cursor):
 
 @pytest.mark.asyncio
 async def test_delete_thread(mock_db_connection, mock_cursor):
-    """delete_thread executes DELETE and returns True."""
+    """delete_thread soft-deletes by setting deleted_at and returns True."""
     from src.server.database.conversation import delete_thread
 
+    mock_cursor.rowcount = 1
     result = await delete_thread("t-1")
 
     assert result is True
     sql = mock_cursor.execute.call_args[0][0]
-    assert "DELETE FROM conversation_threads" in sql
+    assert "UPDATE conversation_threads" in sql
+    assert "deleted_at" in sql
 
 
 # ===========================================================================

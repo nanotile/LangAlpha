@@ -328,9 +328,9 @@ async def get_thread(thread_id: str, x_user_id: CurrentUserId):
 @router.delete("/{thread_id}", response_model=ThreadDeleteResponse)
 async def delete_thread_endpoint(thread_id: str, x_user_id: CurrentUserId):
     """
-    Delete a thread and all its queries/responses.
+    Delete a thread (soft-delete).
 
-    Permanently deletes the thread and all associated data due to CASCADE constraints.
+    Marks the thread as deleted; conversation data is preserved for audit.
     """
     try:
         await require_thread_owner(thread_id, x_user_id)

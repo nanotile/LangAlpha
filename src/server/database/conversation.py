@@ -266,7 +266,7 @@ async def calculate_next_thread_index(workspace_id: str, conn=None) -> int:
                     """
                     SELECT COALESCE(MAX(thread_index), -1) + 1 as next_index
                     FROM conversation_threads
-                    WHERE workspace_id = %s
+                    WHERE workspace_id = %s AND deleted_at IS NULL
                 """,
                     (workspace_id,),
                 )
@@ -279,7 +279,7 @@ async def calculate_next_thread_index(workspace_id: str, conn=None) -> int:
                         """
                         SELECT COALESCE(MAX(thread_index), -1) + 1 as next_index
                         FROM conversation_threads
-                        WHERE workspace_id = %s
+                        WHERE workspace_id = %s AND deleted_at IS NULL
                     """,
                         (workspace_id,),
                     )
@@ -399,6 +399,7 @@ async def lookup_thread_by_external_id(
                     WHERE ct.platform = %s
                       AND ct.external_id = %s
                       AND w.user_id = %s
+                      AND ct.deleted_at IS NULL
                     ORDER BY ct.updated_at DESC
                     LIMIT 1
                 """,
@@ -477,7 +478,7 @@ async def get_thread_checkpoint_id(conversation_thread_id: str) -> str | None:
         async with get_db_connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT latest_checkpoint_id FROM conversation_threads WHERE conversation_thread_id = %s",
+                    "SELECT latest_checkpoint_id FROM conversation_threads WHERE conversation_thread_id = %s AND deleted_at IS NULL",
                     (conversation_thread_id,),
                 )
                 row = await cur.fetchone()
@@ -598,7 +599,7 @@ async def ensure_thread_exists(
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     """
-                    SELECT conversation_thread_id FROM conversation_threads WHERE conversation_thread_id = %s
+                    SELECT conversation_thread_id FROM conversation_threads WHERE conversation_thread_id = %s AND deleted_at IS NULL
                 """,
                     (conversation_thread_id,),
                 )
@@ -678,7 +679,7 @@ async def get_workspace_threads(
                     f"""
                     SELECT COUNT(*) as total
                     FROM conversation_threads
-                    WHERE workspace_id = %s{where_extra}
+                    WHERE workspace_id = %s AND deleted_at IS NULL{where_extra}
                 """,
                     (workspace_id, *extra_params),
                 )
@@ -692,7 +693,7 @@ async def get_workspace_threads(
                         conversation_thread_id, workspace_id, current_status, msg_type, thread_index,
                         title, platform, is_shared, created_at, updated_at
                     FROM conversation_threads
-                    WHERE workspace_id = %s{where_extra}
+                    WHERE workspace_id = %s AND deleted_at IS NULL{where_extra}
                     ORDER BY {sort_by} {sort_order.upper()}
                     LIMIT %s OFFSET %s
                 """
@@ -745,7 +746,7 @@ async def get_threads_for_user(
                     SELECT COUNT(*) as total
                     FROM conversation_threads t
                     JOIN workspaces w ON t.workspace_id = w.workspace_id
-                    WHERE w.user_id = %s AND w.status != 'deleted'{where_extra}
+                    WHERE w.user_id = %s AND w.status != 'deleted' AND t.deleted_at IS NULL{where_extra}
                     """,
                     (user_id, *extra_params),
                 )
@@ -766,7 +767,7 @@ async def get_threads_for_user(
                         ORDER BY q.turn_index ASC
                         LIMIT 1
                     ) fq ON TRUE
-                    WHERE w.user_id = %s AND w.status != 'deleted'{where_extra}
+                    WHERE w.user_id = %s AND w.status != 'deleted' AND t.deleted_at IS NULL{where_extra}
                     ORDER BY {order_by} {sort_order.upper()}
                     LIMIT %s OFFSET %s
                 """
@@ -1629,7 +1630,7 @@ async def get_thread_with_summary(
                     """
                     SELECT conversation_thread_id, workspace_id, current_status, thread_index, created_at, updated_at
                     FROM conversation_threads
-                    WHERE conversation_thread_id = %s
+                    WHERE conversation_thread_id = %s AND deleted_at IS NULL
                 """,
                     (conversation_thread_id,),
                 )
@@ -1731,23 +1732,25 @@ async def truncate_thread_from_turn(
 
 
 async def delete_thread(conversation_thread_id: str) -> bool:
-    """Delete thread (CASCADE to queries, responses)."""
+    """Soft-delete thread (sets deleted_at; data preserved for audit)."""
     try:
         async with get_db_connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     """
-                    DELETE FROM conversation_threads
+                    UPDATE conversation_threads
+                    SET deleted_at = NOW(), updated_at = NOW()
                     WHERE conversation_thread_id = %s
+                      AND deleted_at IS NULL
                 """,
                     (conversation_thread_id,),
                 )
 
-                logger.info(f"Deleted thread: {conversation_thread_id}")
-                return True
+                logger.info(f"Soft-deleted thread: {conversation_thread_id}")
+                return cur.rowcount > 0
 
     except Exception as e:
-        logger.error(f"Error deleting thread: {e}")
+        logger.error(f"Error soft-deleting thread: {e}")
         raise
 
 
@@ -1810,7 +1813,7 @@ async def get_thread_by_id(conversation_thread_id: str) -> Optional[Dict[str, An
                            share_token, is_shared, share_permissions, shared_at,
                            created_at, updated_at
                     FROM conversation_threads
-                    WHERE conversation_thread_id = %s
+                    WHERE conversation_thread_id = %s AND deleted_at IS NULL
                 """,
                     (conversation_thread_id,),
                 )
@@ -1841,7 +1844,7 @@ async def get_thread_owner_id(thread_id: str) -> Optional[str]:
                     SELECT w.user_id
                     FROM conversation_threads t
                     JOIN workspaces w ON w.workspace_id = t.workspace_id
-                    WHERE t.conversation_thread_id = %s
+                    WHERE t.conversation_thread_id = %s AND t.deleted_at IS NULL
                     """,
                     (thread_id,),
                 )
@@ -1878,7 +1881,7 @@ async def get_thread_by_share_token(share_token: str) -> Optional[Dict[str, Any]
                         w.name AS workspace_name
                     FROM conversation_threads t
                     JOIN workspaces w ON w.workspace_id = t.workspace_id
-                    WHERE t.share_token = %s AND t.is_shared = TRUE
+                    WHERE t.share_token = %s AND t.is_shared = TRUE AND t.deleted_at IS NULL
                 """,
                     (share_token,),
                 )
@@ -1973,7 +1976,7 @@ async def get_user_stats(user_id: str) -> Dict[str, Any]:
                         FROM conversation_threads
                         WHERE workspace_id IN (
                             SELECT workspace_id FROM workspaces WHERE user_id = %s
-                        )
+                        ) AND deleted_at IS NULL
                     )
                     SELECT
                         (SELECT COUNT(*) FROM user_threads) as total_threads,
@@ -2012,7 +2015,7 @@ async def get_user_stats(user_id: str) -> Dict[str, Any]:
                         COUNT(*) as count
                     FROM workspaces w
                     JOIN conversation_threads t ON w.workspace_id = t.workspace_id
-                    WHERE w.user_id = %s
+                    WHERE w.user_id = %s AND t.deleted_at IS NULL
                     GROUP BY t.current_status
                 """,
                     (user_id,),
@@ -2057,7 +2060,7 @@ async def get_workspace_stats(workspace_id: str) -> Dict[str, Any]:
                     LEFT JOIN conversation_queries q ON t.conversation_thread_id = q.conversation_thread_id
                     LEFT JOIN conversation_responses r ON t.conversation_thread_id = r.conversation_thread_id
                     LEFT JOIN conversation_usages u ON r.conversation_response_id = u.conversation_response_id
-                    WHERE t.workspace_id = %s
+                    WHERE t.workspace_id = %s AND t.deleted_at IS NULL
                 """,
                     (workspace_id,),
                 )
@@ -2070,7 +2073,7 @@ async def get_workspace_stats(workspace_id: str) -> Dict[str, Any]:
                         current_status,
                         COUNT(*) as count
                     FROM conversation_threads
-                    WHERE workspace_id = %s
+                    WHERE workspace_id = %s AND deleted_at IS NULL
                     GROUP BY current_status
                 """,
                     (workspace_id,),
@@ -2086,7 +2089,7 @@ async def get_workspace_stats(workspace_id: str) -> Dict[str, Any]:
                     FROM conversation_threads t
                     JOIN conversation_responses r ON t.conversation_thread_id = r.conversation_thread_id
                     JOIN conversation_usages u ON r.conversation_response_id = u.conversation_response_id
-                    WHERE t.workspace_id = %s AND u.token_usage IS NOT NULL
+                    WHERE t.workspace_id = %s AND t.deleted_at IS NULL AND u.token_usage IS NOT NULL
                 """,
                     (workspace_id,),
                 )
@@ -2712,7 +2715,7 @@ async def get_replay_thread_data(
                 """SELECT w.user_id
                    FROM conversation_threads t
                    JOIN workspaces w ON w.workspace_id = t.workspace_id
-                   WHERE t.conversation_thread_id = %s""",
+                   WHERE t.conversation_thread_id = %s AND t.deleted_at IS NULL""",
                 (thread_id,),
             )
             owner_row = await cur.fetchone()
@@ -2726,7 +2729,7 @@ async def get_replay_thread_data(
                 """SELECT conversation_thread_id, workspace_id, current_status,
                           thread_index, created_at, updated_at
                    FROM conversation_threads
-                   WHERE conversation_thread_id = %s""",
+                   WHERE conversation_thread_id = %s AND deleted_at IS NULL""",
                 (thread_id,),
             )
             thread = await cur.fetchone()
