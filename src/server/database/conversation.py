@@ -1964,23 +1964,41 @@ async def get_user_stats(user_id: str) -> Dict[str, Any]:
                 )
                 ws_count = (await cur.fetchone())["total_workspaces"]
 
-                # Get thread statistics via workspaces
+                # Get thread statistics via subqueries (avoids cross-product
+                # between queries and responses that the old 4-way JOIN created)
                 await cur.execute(
                     """
+                    WITH user_threads AS (
+                        SELECT conversation_thread_id, created_at, updated_at
+                        FROM conversation_threads
+                        WHERE workspace_id IN (
+                            SELECT workspace_id FROM workspaces WHERE user_id = %s
+                        )
+                    )
                     SELECT
-                        COUNT(DISTINCT t.conversation_thread_id) as total_threads,
-                        COUNT(DISTINCT q.conversation_query_id) as total_queries,
-                        COUNT(DISTINCT r.conversation_response_id) as total_responses,
-                        COALESCE(SUM((u.token_usage->>'total_cost')::float), 0) as total_cost,
-                        COALESCE(SUM(r.execution_time), 0) as total_execution_time,
-                        MIN(t.created_at) as first_activity,
-                        MAX(t.updated_at) as last_activity
-                    FROM workspaces w
-                    LEFT JOIN conversation_threads t ON w.workspace_id = t.workspace_id
-                    LEFT JOIN conversation_queries q ON t.conversation_thread_id = q.conversation_thread_id
-                    LEFT JOIN conversation_responses r ON t.conversation_thread_id = r.conversation_thread_id
-                    LEFT JOIN conversation_usages u ON r.conversation_response_id = u.conversation_response_id
-                    WHERE w.user_id = %s
+                        (SELECT COUNT(*) FROM user_threads) as total_threads,
+                        (SELECT COUNT(*) FROM conversation_queries
+                         WHERE conversation_thread_id IN (
+                             SELECT conversation_thread_id FROM user_threads
+                         )) as total_queries,
+                        (SELECT COUNT(*) FROM conversation_responses
+                         WHERE conversation_thread_id IN (
+                             SELECT conversation_thread_id FROM user_threads
+                         )) as total_responses,
+                        (SELECT COALESCE(SUM((u.token_usage->>'total_cost')::float), 0)
+                         FROM conversation_usages u
+                         JOIN conversation_responses r
+                             ON u.conversation_response_id = r.conversation_response_id
+                         WHERE r.conversation_thread_id IN (
+                             SELECT conversation_thread_id FROM user_threads
+                         )) as total_cost,
+                        (SELECT COALESCE(SUM(execution_time), 0)
+                         FROM conversation_responses
+                         WHERE conversation_thread_id IN (
+                             SELECT conversation_thread_id FROM user_threads
+                         )) as total_execution_time,
+                        (SELECT MIN(created_at) FROM user_threads) as first_activity,
+                        (SELECT MAX(updated_at) FROM user_threads) as last_activity
                 """,
                     (user_id,),
                 )

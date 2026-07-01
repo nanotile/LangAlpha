@@ -71,9 +71,13 @@ services:
       # Required when SANDBOX_PROVIDER=docker and the backend auto-builds
       # langalpha-sandbox:latest on first workspace creation.
       - ./Dockerfile.sandbox:/app/Dockerfile.sandbox:ro
-      # Docker socket — only needed when SANDBOX_PROVIDER=docker (DooD pattern).
-      # Safe to remove if using only the Daytona provider.
-      - ${DOCKER_HOST_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      # Docker socket is NOT mounted by default (root-equivalent host access).
+      # If using SANDBOX_PROVIDER=docker, add this volume to a
+      # docker-compose.override.yml:
+      #   services:
+      #     backend:
+      #       volumes:
+      #         - /var/run/docker.sock:/var/run/docker.sock
       - ./config.yaml:/app/config.yaml
       - ./mcp_servers:/app/mcp_servers
       - ./skills:/app/skills

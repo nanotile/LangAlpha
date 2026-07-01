@@ -231,13 +231,13 @@ def _env_pool_size(env_var: str, default: int, ceiling: int = 500) -> int:
 
 
 def get_checkpointer_pool_max() -> int:
-    """Env POSTGRES_CHECKPOINTER_POOL_MAX, default 25."""
-    return _env_pool_size("POSTGRES_CHECKPOINTER_POOL_MAX", default=25)
+    """Env POSTGRES_CHECKPOINTER_POOL_MAX, default 10."""
+    return _env_pool_size("POSTGRES_CHECKPOINTER_POOL_MAX", default=10)
 
 
 def get_conversation_pool_max() -> int:
-    """Env POSTGRES_CONVERSATION_POOL_MAX, default 50."""
-    return _env_pool_size("POSTGRES_CONVERSATION_POOL_MAX", default=50)
+    """Env POSTGRES_CONVERSATION_POOL_MAX, default 20."""
+    return _env_pool_size("POSTGRES_CONVERSATION_POOL_MAX", default=20)
 
 
 def get_redis_socket_connect_timeout() -> int:
